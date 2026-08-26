@@ -8,6 +8,7 @@ use gpui::SharedString;
 use http_client::{AsyncBody, HttpClient, HttpRequestExt, Request};
 use serde::Deserialize;
 use url::Url;
+use urlencoding::encode;
 
 use git::{
     BuildCommitPermalinkParams, BuildPermalinkParams, GitHostingProvider, ParsedGitRemote,
@@ -228,6 +229,21 @@ impl GitHostingProvider for Forgejo {
         permalink
     }
 
+    fn build_create_pull_request_url(
+        &self,
+        remote: &ParsedGitRemote,
+        source_branch: &str,
+    ) -> Option<Url> {
+        let ParsedGitRemote { owner, repo } = remote;
+        let encoded_source = encode(source_branch);
+
+        // Forgejo's compare route against a bare branch diffs it against the
+        // default branch and offers the "New Pull Request" form.
+        self.base_url()
+            .join(&format!("{owner}/{repo}/compare/{encoded_source}"))
+            .ok()
+    }
+
     async fn commit_author_avatar_url(
         &self,
         repo_owner: &str,
@@ -430,5 +446,41 @@ mod tests {
 
         let expected_url = "https://forgejo-instance.big-co.com/zed-industries/zed/src/commit/b2efec9824c45fcc90c9a7eb107a50d1772a60aa/crates/zed/src/main.rs";
         assert_eq!(permalink.to_string(), expected_url.to_string())
+    }
+
+    #[test]
+    fn test_build_codeberg_create_pull_request_url() {
+        let remote = ParsedGitRemote {
+            owner: "zed-industries".into(),
+            repo: "zed".into(),
+        };
+
+        let url = Forgejo::public_instance()
+            .build_create_pull_request_url(&remote, "feature/my-branch")
+            .expect("url should be constructed");
+
+        assert_eq!(
+            url.as_str(),
+            "https://codeberg.org/zed-industries/zed/compare/feature%2Fmy-branch"
+        );
+    }
+
+    #[test]
+    fn test_build_forgejo_self_hosted_create_pull_request_url() {
+        let forgejo =
+            Forgejo::from_remote_url("git@forgejo.big-co.com:zed-industries/zed.git").unwrap();
+        let remote = ParsedGitRemote {
+            owner: "zed-industries".into(),
+            repo: "zed".into(),
+        };
+
+        let url = forgejo
+            .build_create_pull_request_url(&remote, "feature/something cool")
+            .expect("url should be constructed");
+
+        assert_eq!(
+            url.as_str(),
+            "https://forgejo.big-co.com/zed-industries/zed/compare/feature%2Fsomething%20cool"
+        );
     }
 }
