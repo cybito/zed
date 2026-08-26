@@ -1164,6 +1164,7 @@ async fn open_worktree_workspace(
         .ok_or_else(|| anyhow!("No window handle available for workspace creation"))?;
 
     let focused_dock = previous_state.focused_dock;
+    let center_pane_visible = previous_state.center_pane_visible;
 
     let is_creating_new_worktree = matches!(operation, WorktreeOperation::Create);
 
@@ -1198,6 +1199,7 @@ async fn open_worktree_workspace(
                           window: &mut gpui::Window,
                           cx: &mut gpui::Context<Workspace>| {
                         workspace.set_dock_structure(dock_structure, window, cx);
+                        workspace.restore_center_pane_visibility(center_pane_visible, cx);
                     },
                 ))
             } else {
@@ -1596,6 +1598,62 @@ mod tests {
             ["setup worktree"],
             "switching back to the main worktree should not rerun create_worktree hooks"
         );
+    }
+
+    #[gpui::test]
+    async fn test_linked_worktree_inherits_center_pane_visibility(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
+        fs.insert_tree(
+            "/root",
+            json!({
+                "project": {
+                    ".git": {},
+                    "src": {
+                        "main.rs": "fn main() {}",
+                    },
+                },
+            }),
+        )
+        .await;
+
+        let main_project_root = PathBuf::from(path!("/root/project"));
+        let project = Project::test(fs.clone(), [main_project_root.as_path()], cx).await;
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.retain_active_workspace(cx);
+        });
+
+        let main_workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        main_workspace.update_in(cx, |workspace, window, cx| {
+            workspace.restore_center_pane_visibility(Some(false), cx);
+            handle_create_worktree(
+                workspace,
+                &zed_actions::CreateWorktree {
+                    worktree_name: Some("feature".to_string()),
+                    branch_target: NewWorktreeBranchTarget::CurrentBranch,
+                },
+                window,
+                None,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let linked_workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        assert_ne!(linked_workspace, main_workspace);
+        linked_workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.is_center_pane_visible(cx));
+        });
     }
 
     #[gpui::test]

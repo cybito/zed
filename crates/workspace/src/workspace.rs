@@ -43,6 +43,7 @@ pub use remote::{
 };
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
 
+use agent_settings::{AgentSettings, WindowLayout};
 use anyhow::{Context as _, Result, anyhow};
 use client::{
     ChannelId, Client, ErrorExt, ParticipantIndex, Status, TypedEnvelope, User, UserStore,
@@ -145,7 +146,7 @@ pub use toolbar::{
     PaneSearchBarCallbacks, Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
 };
 pub use ui;
-use ui::{Window, prelude::*};
+use ui::{Tooltip, Window, prelude::*};
 use url::Url;
 use util::{
     ResultExt, TryFutureExt,
@@ -329,6 +330,8 @@ actions!(
         SuppressNotification,
         /// Toggles the bottom dock.
         ToggleBottomDock,
+        /// Toggles the center editor area.
+        ToggleCenterPane,
         /// Toggles centered layout mode.
         ToggleCenteredLayout,
         /// Toggles edit prediction feature globally for all files.
@@ -1149,6 +1152,7 @@ pub struct PreviousWorkspaceState {
     pub open_file_paths: Vec<PathBuf>,
     pub active_file_path: Option<PathBuf>,
     pub focused_dock: Option<DockPosition>,
+    pub center_pane_visible: Option<bool>,
 }
 
 pub struct WorkspaceStore {
@@ -1377,6 +1381,7 @@ pub struct Workspace {
     zoomed_position: Option<DockPosition>,
     maximized_pane: Option<WeakEntity<Pane>>,
     center: PaneGroup,
+    center_pane_visible: Option<bool>,
     left_dock: Entity<Dock>,
     bottom_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
@@ -1672,7 +1677,8 @@ impl Workspace {
         })
         .detach();
 
-        let weak_handle = cx.entity().downgrade();
+        let workspace_handle = cx.entity();
+        let weak_handle = workspace_handle.downgrade();
         let pane_history_timestamp = Arc::new(AtomicUsize::new(0));
 
         let center_pane = cx.new(|cx| {
@@ -1749,6 +1755,7 @@ impl Workspace {
         let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
         let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
         let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
+        let center_pane_button = cx.new(|cx| CenterPaneButton::new(workspace_handle.clone(), cx));
         let multi_workspace = window
             .root::<MultiWorkspace>()
             .flatten()
@@ -1759,6 +1766,7 @@ impl Workspace {
             status_bar.add_left_item(left_dock_buttons, window, cx);
             status_bar.add_right_item(right_dock_buttons, window, cx);
             status_bar.add_right_item(bottom_dock_buttons, window, cx);
+            status_bar.add_right_item(center_pane_button, window, cx);
             status_bar
         });
 
@@ -1781,6 +1789,11 @@ impl Workspace {
         });
 
         let subscriptions = vec![
+            cx.observe_global::<SettingsStore>(|this, cx| {
+                if this.center_pane_visible.is_none() {
+                    cx.notify();
+                }
+            }),
             cx.observe_window_activation(window, Self::on_window_activation_changed),
             cx.observe_window_bounds(window, move |this, window, cx| {
                 if !window.is_window_active() {
@@ -1835,6 +1848,7 @@ impl Workspace {
             maximized_pane: None,
             previous_dock_drag_coordinates: None,
             center,
+            center_pane_visible: None,
             panes: vec![center_pane.clone()],
             panes_by_item: Default::default(),
             active_pane: center_pane.clone(),
@@ -1996,6 +2010,10 @@ impl Workspace {
                 });
             }
 
+            let center_pane_visibility = serialized_workspace
+                .as_ref()
+                .and_then(|workspace| workspace.center_pane_visible);
+
             let window_to_replace = match open_mode {
                 OpenMode::NewWindow => None,
                 _ => requesting_window,
@@ -2019,6 +2037,7 @@ impl Workspace {
                             );
 
                             workspace.centered_layout = centered_layout;
+                            workspace.restore_center_pane_visibility(center_pane_visibility, cx);
 
                             // Call init callback to add items before window renders
                             if let Some(init) = init {
@@ -2082,6 +2101,8 @@ impl Workspace {
                                     cx,
                                 );
                                 workspace.centered_layout = centered_layout;
+                                workspace
+                                    .restore_center_pane_visibility(center_pane_visibility, cx);
 
                                 // Call init callback to add items before window renders
                                 if let Some(init) = init {
@@ -2124,6 +2145,8 @@ impl Workspace {
             // 1. This is an empty workspace (no paths), AND
             // 2. The serialized workspace either doesn't exist or has no paths
             if is_empty_workspace && !serialized_workspace_has_paths {
+                let default_center_pane_visibility =
+                    persistence::read_default_center_pane_visible(&kvp);
                 if let Some(default_docks) = persistence::read_default_dock_state(&kvp) {
                     window
                         .update(cx, |_, window, cx| {
@@ -2139,6 +2162,18 @@ impl Workspace {
                                     });
                                 }
                                 cx.notify();
+                            });
+                        })
+                        .log_err();
+                }
+                if default_center_pane_visibility.is_some() {
+                    window
+                        .update(cx, |_, _, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.restore_center_pane_visibility(
+                                    default_center_pane_visibility,
+                                    cx,
+                                );
                             });
                         })
                         .log_err();
@@ -2192,6 +2227,68 @@ impl Workspace {
 
     pub fn bottom_dock(&self) -> &Entity<Dock> {
         &self.bottom_dock
+    }
+
+    pub fn is_center_pane_visible(&self, cx: &App) -> bool {
+        self.center_pane_visible
+            .unwrap_or_else(|| !matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_)))
+    }
+
+    pub fn show_center_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_center_pane_visible(cx) {
+            self.set_center_pane_visible(true, window, cx);
+        }
+    }
+
+    pub fn restore_center_pane_visibility(
+        &mut self,
+        visibility: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        let was_visible = self.is_center_pane_visible(cx);
+        self.center_pane_visible = visibility;
+        if was_visible != self.is_center_pane_visible(cx) {
+            cx.notify();
+        }
+    }
+
+    fn set_center_pane_visible(
+        &mut self,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_visible = self.is_center_pane_visible(cx);
+        let center_had_focus = !visible
+            && self
+                .panes
+                .iter()
+                .any(|pane| pane.read(cx).has_focus(window, cx));
+        self.center_pane_visible = Some(visible);
+
+        if was_visible != visible {
+            cx.notify();
+            self.serialize_workspace(window, cx);
+            if center_had_focus {
+                self.move_part_focus(true, window, cx);
+            }
+        }
+    }
+
+    fn toggle_center_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_center_pane_visible(!self.is_center_pane_visible(cx), window, cx);
+    }
+
+    fn toggle_bottom_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.bottom_dock.read(cx).is_open() {
+            self.show_center_pane(window, cx);
+        }
+        self.toggle_dock(DockPosition::Bottom, window, cx);
+    }
+    fn hide_center_pane_if_empty(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.items(cx).next().is_none() {
+            self.set_center_pane_visible(false, window, cx);
+        }
     }
 
     pub fn set_bottom_dock_layout(
@@ -2333,6 +2430,7 @@ impl Workspace {
             open_file_paths,
             active_file_path,
             focused_dock,
+            center_pane_visible: self.center_pane_visible,
         }
     }
 
@@ -4357,6 +4455,7 @@ impl Workspace {
     }
 
     pub fn focus_center_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_center_pane(window, cx);
         if let Some(item) = self.active_item(cx) {
             item.item_focus_handle(cx).focus(window, cx);
         } else {
@@ -5146,6 +5245,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_center_pane(window, cx);
         let panes = self.center.panes();
         if let Some(pane) = panes.get(action.0).map(|p| (*p).clone()) {
             window.focus(&pane.focus_handle(cx), cx);
@@ -5206,7 +5306,8 @@ impl Workspace {
         )
     }
 
-    pub fn activate_next_pane(&mut self, window: &mut Window, cx: &mut App) {
+    pub fn activate_next_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_center_pane(window, cx);
         let panes = self.center.panes();
         if let Some(ix) = panes.iter().position(|pane| **pane == self.active_pane) {
             let next_ix = (ix + 1) % panes.len();
@@ -5215,7 +5316,8 @@ impl Workspace {
         }
     }
 
-    pub fn activate_previous_pane(&mut self, window: &mut Window, cx: &mut App) {
+    pub fn activate_previous_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_center_pane(window, cx);
         let panes = self.center.panes();
         if let Some(ix) = panes.iter().position(|pane| **pane == self.active_pane) {
             let prev_ix = cmp::min(ix.wrapping_sub(1), panes.len() - 1);
@@ -5224,7 +5326,8 @@ impl Workspace {
         }
     }
 
-    pub fn activate_last_pane(&mut self, window: &mut Window, cx: &mut App) {
+    pub fn activate_last_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_center_pane(window, cx);
         let last_pane = self.center.last_pane();
         window.focus(&last_pane.focus_handle(cx), cx);
     }
@@ -5233,7 +5336,7 @@ impl Workspace {
         &mut self,
         direction: SplitDirection,
         window: &mut Window,
-        cx: &mut App,
+        cx: &mut Context<Self>,
     ) {
         use ActivateInDirectionTarget as Target;
         enum Origin {
@@ -5404,6 +5507,7 @@ impl Workspace {
 
         match target {
             Some(ActivateInDirectionTarget::Pane(pane)) => {
+                self.show_center_pane(window, cx);
                 let pane = pane.read(cx);
                 if let Some(item) = pane.active_item() {
                     item.item_focus_handle(cx).focus(window, cx);
@@ -5718,6 +5822,7 @@ impl Workspace {
                 cx.emit(Event::ItemRemoved {
                     item_id: item.item_id(),
                 });
+                self.hide_center_pane_if_empty(window, cx);
             }
             pane::Event::Focus => {
                 window.invalidate_character_coordinates();
@@ -7174,6 +7279,7 @@ impl Workspace {
                     breakpoints,
                     window_id: Some(window.window_handle().window_id().as_u64()),
                     user_toolchains,
+                    center_pane_visible: self.center_pane_visible,
                 };
 
                 let db = WorkspaceDb::global(cx);
@@ -7186,6 +7292,7 @@ impl Workspace {
                 let display = window.display(cx).and_then(|d| d.uuid().ok());
                 // Save dock state for empty local workspaces
                 let docks = build_serialized_docks(self, window, cx);
+                let center_pane_visible = self.center_pane_visible;
                 let db = WorkspaceDb::global(cx);
                 let kvp = db::kvp::KeyValueStore::global(cx);
                 window.spawn(cx, async move |_| {
@@ -7200,14 +7307,21 @@ impl Workspace {
                     persistence::write_default_dock_state(&kvp, docks)
                         .await
                         .log_err();
+                    persistence::write_default_center_pane_visible(&kvp, center_pane_visible)
+                        .await
+                        .log_err();
                 })
             }
             WorkspaceLocation::None => {
                 // Save dock state for empty non-local workspaces
                 let docks = build_serialized_docks(self, window, cx);
+                let center_pane_visible = self.center_pane_visible;
                 let kvp = db::kvp::KeyValueStore::global(cx);
                 window.spawn(cx, async move |_| {
                     persistence::write_default_dock_state(&kvp, docks)
+                        .await
+                        .log_err();
+                    persistence::write_default_center_pane_visible(&kvp, center_pane_visible)
                         .await
                         .log_err();
                 })
@@ -7625,8 +7739,13 @@ impl Workspace {
                 },
             ))
             .on_action(cx.listener(
+                |workspace: &mut Workspace, _: &ToggleCenterPane, window, cx| {
+                    workspace.toggle_center_pane(window, cx);
+                },
+            ))
+            .on_action(cx.listener(
                 |workspace: &mut Workspace, _: &ToggleBottomDock, window, cx| {
-                    workspace.toggle_dock(DockPosition::Bottom, window, cx);
+                    workspace.toggle_bottom_dock(window, cx);
                 },
             ))
             .on_action(cx.listener(
@@ -8184,15 +8303,17 @@ impl Workspace {
             &self.region_focus_handles.left_dock,
         ));
 
-        let center_pane = self
-            .last_active_center_pane
-            .as_ref()
-            .and_then(|pane| pane.upgrade())
-            .unwrap_or_else(|| self.center.first_pane());
-        parts.push(FocusablePart::landmark(
-            self.region_focus_handles.editor.clone(),
-            center_pane.read(cx).focus_handle(cx),
-        ));
+        if self.is_center_pane_visible(cx) {
+            let center_pane = self
+                .last_active_center_pane
+                .as_ref()
+                .and_then(|pane| pane.upgrade())
+                .unwrap_or_else(|| self.center.first_pane());
+            parts.push(FocusablePart::landmark(
+                self.region_focus_handles.editor.clone(),
+                center_pane.read(cx).focus_handle(cx),
+            ));
+        }
 
         parts.extend(dock_part(
             &self.right_dock,
@@ -8952,6 +9073,64 @@ impl Render for DraggedDock {
     }
 }
 
+struct CenterPaneButton {
+    workspace: WeakEntity<Workspace>,
+}
+
+impl CenterPaneButton {
+    fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
+        Self {
+            workspace: workspace.downgrade(),
+        }
+    }
+}
+
+impl Render for CenterPaneButton {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let visible = self
+            .workspace
+            .upgrade()
+            .is_some_and(|workspace| workspace.read(cx).is_center_pane_visible(cx));
+        let label: SharedString = if visible {
+            "Hide Editor".into()
+        } else {
+            "Show Editor".into()
+        };
+
+        IconButton::new("toggle-center-pane", IconName::Split)
+            .icon_size(IconSize::Small)
+            .toggle_state(visible)
+            .tab_index(0isize)
+            .aria_label(label.clone())
+            .on_click({
+                let workspace = self.workspace.clone();
+                move |_, window, cx| {
+                    if let Some(workspace) = workspace.upgrade() {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.toggle_center_pane(window, cx);
+                        });
+                    }
+                }
+            })
+            .tooltip(move |_window, cx| Tooltip::for_action(label.clone(), &ToggleCenterPane, cx))
+    }
+}
+
+impl StatusItemView for CenterPaneButton {
+    fn set_active_pane_item(
+        &mut self,
+        _active_pane_item: Option<&dyn ItemHandle>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
+    fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
+        None
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         static FIRST_PAINT: AtomicBool = AtomicBool::new(true);
@@ -8994,6 +9173,9 @@ impl Render for Workspace {
             .map(|(_, notification)| notification.entity_id())
             .collect::<Vec<_>>();
         let bottom_dock_layout = WorkspaceSettings::get_global(cx).bottom_dock_layout;
+        let center_pane_visible = self.is_center_pane_visible(cx);
+        let bottom_dock_open = self.bottom_dock.read(cx).is_open();
+        let center_or_bottom_dock_visible = center_pane_visible || bottom_dock_open;
 
         let pane_render_context = PaneRenderContext {
             follower_states: &self.follower_states,
@@ -9003,6 +9185,31 @@ impl Render for Workspace {
             project: &self.project,
             workspace: &self.weak_self,
         };
+        let left_dock = self.render_dock(DockPosition::Left, &self.left_dock, window, cx);
+        let left_dock = if !center_pane_visible
+            && self
+                .left_dock
+                .read(cx)
+                .visible_panel()
+                .is_some_and(|panel| panel.is_agent_panel(cx))
+        {
+            left_dock.map(|dock| dock.flex_1())
+        } else {
+            left_dock
+        };
+        let right_dock = self.render_dock(DockPosition::Right, &self.right_dock, window, cx);
+        let right_dock = if !center_pane_visible
+            && self
+                .right_dock
+                .read(cx)
+                .visible_panel()
+                .is_some_and(|panel| panel.is_agent_panel(cx))
+        {
+            right_dock.map(|dock| dock.flex_1())
+        } else {
+            right_dock
+        };
+        let bottom_dock = self.render_dock(DockPosition::Bottom, &self.bottom_dock, window, cx);
 
         div()
             .relative()
@@ -9168,50 +9375,44 @@ impl Render for Workspace {
                                                 .flex_row()
                                                 .flex_1()
                                                 .overflow_hidden()
-                                                .children(self.render_dock(
-                                                    DockPosition::Left,
-                                                    &self.left_dock,
-                                                    window,
-                                                    cx,
-                                                ))
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .flex_1()
-                                                        .overflow_hidden()
-                                                        .child(
-                                                            h_flex()
-                                                                .flex_1()
-                                                                .when_some(paddings.0, |this, p| {
-                                                                    this.child(p.border_r_1())
-                                                                })
-                                                                .child(self.render_center(
-                                                                    &pane_render_context,
-                                                                    window,
-                                                                    cx,
-                                                                ))
-                                                                .when_some(
-                                                                    paddings.1,
-                                                                    |this, p| {
-                                                                        this.child(p.border_l_1())
-                                                                    },
-                                                                ),
-                                                        ),
-                                                )
-                                                .children(self.render_dock(
-                                                    DockPosition::Right,
-                                                    &self.right_dock,
-                                                    window,
-                                                    cx,
-                                                )),
+                                                .children(left_dock)
+                                                .when(center_pane_visible, |this| {
+                                                    this.child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .flex_1()
+                                                            .overflow_hidden()
+                                                            .child(
+                                                                h_flex()
+                                                                    .flex_1()
+                                                                    .when_some(
+                                                                        paddings.0,
+                                                                        |this, padding| {
+                                                                            this.child(
+                                                                                padding.border_r_1(),
+                                                                            )
+                                                                        },
+                                                                    )
+                                                                    .child(self.render_center(
+                                                                        &pane_render_context,
+                                                                        window,
+                                                                        cx,
+                                                                    ))
+                                                                    .when_some(
+                                                                        paddings.1,
+                                                                        |this, padding| {
+                                                                            this.child(
+                                                                                padding.border_l_1(),
+                                                                            )
+                                                                        },
+                                                                    ),
+                                                            ),
+                                                    )
+                                                })
+                                                .children(right_dock),
                                         )
-                                        .child(div().w_full().children(self.render_dock(
-                                            DockPosition::Bottom,
-                                            &self.bottom_dock,
-                                            window,
-                                            cx,
-                                        ))),
+                                        .child(div().w_full().children(bottom_dock)),
 
                                     BottomDockLayout::LeftAligned => div()
                                         .flex()
@@ -9221,179 +9422,172 @@ impl Render for Workspace {
                                             div()
                                                 .flex()
                                                 .flex_col()
-                                                .flex_1()
                                                 .h_full()
+                                                .when(center_or_bottom_dock_visible, |this| {
+                                                    this.flex_1()
+                                                })
                                                 .child(
                                                     div()
                                                         .flex()
                                                         .flex_row()
                                                         .flex_1()
-                                                        .children(self.render_dock(
-                                                            DockPosition::Left,
-                                                            &self.left_dock,
-                                                            window,
-                                                            cx,
-                                                        ))
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .flex_col()
-                                                                .flex_1()
-                                                                .overflow_hidden()
-                                                                .child(
-                                                                    h_flex()
-                                                                        .flex_1()
-                                                                        .when_some(
-                                                                            paddings.0,
-                                                                            |this, p| {
-                                                                                this.child(
-                                                                                    p.border_r_1(),
-                                                                                )
-                                                                            },
-                                                                        )
-                                                                        .child(self.render_center(
-                                                                            &pane_render_context,
-                                                                            window,
-                                                                            cx,
-                                                                        ))
-                                                                        .when_some(
-                                                                            paddings.1,
-                                                                            |this, p| {
-                                                                                this.child(
-                                                                                    p.border_l_1(),
-                                                                                )
-                                                                            },
-                                                                        ),
-                                                                ),
-                                                        ),
+                                                        .children(left_dock)
+                                                        .when(center_pane_visible, |this| {
+                                                            this.child(
+                                                                div()
+                                                                    .flex()
+                                                                    .flex_col()
+                                                                    .flex_1()
+                                                                    .overflow_hidden()
+                                                                    .child(
+                                                                        h_flex()
+                                                                            .flex_1()
+                                                                            .when_some(
+                                                                                paddings.0,
+                                                                                |this, padding| {
+                                                                                    this.child(
+                                                                                        padding
+                                                                                            .border_r_1(),
+                                                                                    )
+                                                                                },
+                                                                            )
+                                                                            .child(
+                                                                                self.render_center(
+                                                                                    &pane_render_context,
+                                                                                    window,
+                                                                                    cx,
+                                                                                ),
+                                                                            )
+                                                                            .when_some(
+                                                                                paddings.1,
+                                                                                |this, padding| {
+                                                                                    this.child(
+                                                                                        padding
+                                                                                            .border_l_1(),
+                                                                                    )
+                                                                                },
+                                                                            ),
+                                                                    ),
+                                                            )
+                                                        }),
                                                 )
-                                                .child(div().w_full().children(self.render_dock(
-                                                    DockPosition::Bottom,
-                                                    &self.bottom_dock,
-                                                    window,
-                                                    cx,
-                                                ))),
+                                                .child(div().w_full().children(bottom_dock)),
                                         )
-                                        .children(self.render_dock(
-                                            DockPosition::Right,
-                                            &self.right_dock,
-                                            window,
-                                            cx,
-                                        )),
+                                        .children(right_dock),
+
                                     BottomDockLayout::RightAligned => div()
                                         .flex()
                                         .flex_row()
                                         .h_full()
-                                        .children(self.render_dock(
-                                            DockPosition::Left,
-                                            &self.left_dock,
-                                            window,
-                                            cx,
-                                        ))
+                                        .children(left_dock)
                                         .child(
                                             div()
                                                 .flex()
                                                 .flex_col()
-                                                .flex_1()
                                                 .h_full()
+                                                .when(center_or_bottom_dock_visible, |this| {
+                                                    this.flex_1()
+                                                })
+                                                .when(!center_or_bottom_dock_visible, |this| {
+                                                    this.ml_auto()
+                                                })
                                                 .child(
                                                     div()
                                                         .flex()
                                                         .flex_row()
                                                         .flex_1()
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .flex_col()
-                                                                .flex_1()
-                                                                .overflow_hidden()
-                                                                .child(
-                                                                    h_flex()
-                                                                        .flex_1()
-                                                                        .when_some(
-                                                                            paddings.0,
-                                                                            |this, p| {
-                                                                                this.child(
-                                                                                    p.border_r_1(),
-                                                                                )
-                                                                            },
-                                                                        )
-                                                                        .child(self.render_center(
-                                                                            &pane_render_context,
-                                                                            window,
-                                                                            cx,
-                                                                        ))
-                                                                        .when_some(
-                                                                            paddings.1,
-                                                                            |this, p| {
-                                                                                this.child(
-                                                                                    p.border_l_1(),
-                                                                                )
-                                                                            },
-                                                                        ),
-                                                                ),
-                                                        )
-                                                        .children(self.render_dock(
-                                                            DockPosition::Right,
-                                                            &self.right_dock,
-                                                            window,
-                                                            cx,
-                                                        )),
+                                                        .when(center_pane_visible, |this| {
+                                                            this.child(
+                                                                div()
+                                                                    .flex()
+                                                                    .flex_col()
+                                                                    .flex_1()
+                                                                    .overflow_hidden()
+                                                                    .child(
+                                                                        h_flex()
+                                                                            .flex_1()
+                                                                            .when_some(
+                                                                                paddings.0,
+                                                                                |this, padding| {
+                                                                                    this.child(
+                                                                                        padding
+                                                                                            .border_r_1(),
+                                                                                    )
+                                                                                },
+                                                                            )
+                                                                            .child(
+                                                                                self.render_center(
+                                                                                    &pane_render_context,
+                                                                                    window,
+                                                                                    cx,
+                                                                                ),
+                                                                            )
+                                                                            .when_some(
+                                                                                paddings.1,
+                                                                                |this, padding| {
+                                                                                    this.child(
+                                                                                        padding
+                                                                                            .border_l_1(),
+                                                                                    )
+                                                                                },
+                                                                            ),
+                                                                    ),
+                                                            )
+                                                        })
+                                                        .children(right_dock),
                                                 )
-                                                .child(div().w_full().children(self.render_dock(
-                                                    DockPosition::Bottom,
-                                                    &self.bottom_dock,
-                                                    window,
-                                                    cx,
-                                                ))),
+                                                .child(div().w_full().children(bottom_dock)),
                                         ),
+
                                     BottomDockLayout::Contained => div()
                                         .flex()
                                         .flex_row()
                                         .h_full()
-                                        .children(self.render_dock(
-                                            DockPosition::Left,
-                                            &self.left_dock,
-                                            window,
-                                            cx,
-                                        ))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .flex_1()
-                                                .overflow_hidden()
-                                                .child(
-                                                    h_flex()
-                                                        .flex_1()
-                                                        .when_some(paddings.0, |this, p| {
-                                                            this.child(p.border_r_1())
-                                                        })
-                                                        .child(self.render_center(
-                                                            &pane_render_context,
-                                                            window,
-                                                            cx,
-                                                        ))
-                                                        .when_some(paddings.1, |this, p| {
-                                                            this.child(p.border_l_1())
-                                                        }),
-                                                )
-                                                .children(self.render_dock(
-                                                    DockPosition::Bottom,
-                                                    &self.bottom_dock,
-                                                    window,
-                                                    cx,
-                                                )),
-                                        )
-                                        .children(self.render_dock(
-                                            DockPosition::Right,
-                                            &self.right_dock,
-                                            window,
-                                            cx,
-                                        )),
+                                        .children(left_dock)
+                                        .when(center_or_bottom_dock_visible, |this| {
+                                            this.child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .when(center_pane_visible, |this| {
+                                                        this.child(
+                                                            h_flex()
+                                                                .flex_1()
+                                                                .when_some(
+                                                                    paddings.0,
+                                                                    |this, padding| {
+                                                                        this.child(
+                                                                            padding.border_r_1(),
+                                                                        )
+                                                                    },
+                                                                )
+                                                                .child(self.render_center(
+                                                                    &pane_render_context,
+                                                                    window,
+                                                                    cx,
+                                                                ))
+                                                                .when_some(
+                                                                    paddings.1,
+                                                                    |this, padding| {
+                                                                        this.child(
+                                                                            padding.border_l_1(),
+                                                                        )
+                                                                    },
+                                                                ),
+                                                        )
+                                                    })
+                                                    .children(bottom_dock),
+                                            )
+                                        })
+                                        .children(right_dock),
                                 }
                             })
                             .children(self.zoomed.as_ref().and_then(|view| {
+                                if !center_pane_visible && self.zoomed_position.is_none() {
+                                    return None;
+                                }
                                 let zoomed_view = view.upgrade()?;
                                 let div = div()
                                     .occlude()
@@ -10367,6 +10561,7 @@ pub fn open_workspace_by_id(
             .with_context(|| format!("Workspace {workspace_id:?} not found"))?;
 
         let centered_layout = serialized_workspace.centered_layout;
+        let center_pane_visibility = serialized_workspace.center_pane_visible;
 
         let (window, workspace) = if let Some(window) = requesting_window {
             let workspace = window.update(cx, |multi_workspace, window, cx| {
@@ -10379,6 +10574,7 @@ pub fn open_workspace_by_id(
                         cx,
                     );
                     workspace.centered_layout = centered_layout;
+                    workspace.restore_center_pane_visibility(center_pane_visibility, cx);
                     workspace
                 });
                 multi_workspace.add(workspace.clone(), &*window, cx);
@@ -10419,6 +10615,7 @@ pub fn open_workspace_by_id(
                             cx,
                         );
                         workspace.centered_layout = centered_layout;
+                        workspace.restore_center_pane_visibility(center_pane_visibility, cx);
                         workspace
                     });
                     cx.new(|cx| MultiWorkspace::new(workspace, window, cx))
@@ -10864,6 +11061,7 @@ async fn open_remote_project_inner(
 
             if let Some(ref serialized) = serialized_workspace {
                 workspace.centered_layout = serialized.centered_layout;
+                workspace.restore_center_pane_visibility(serialized.center_pane_visible, cx);
             }
 
             workspace
@@ -11648,8 +11846,8 @@ mod tests {
     };
     use fs::FakeFs;
     use gpui::{
-        DismissEvent, Empty, EventEmitter, FocusHandle, Focusable, Render, TestAppContext,
-        UpdateGlobal, VisualTestContext, px,
+        DismissEvent, Empty, EventEmitter, FocusHandle, Focusable, Modifiers, MouseButton,
+        MouseDownEvent, MouseUpEvent, Render, TestAppContext, UpdateGlobal, VisualTestContext, px,
     };
     use project::{Project, ProjectEntryId, WorktreeId};
     use serde_json::json;
@@ -17678,6 +17876,293 @@ mod tests {
             cx.set_global(settings_store);
             cx.set_global(db::AppDatabase::test_new());
             theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_center_pane_visibility(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store
+                    .set_user_settings(
+                        r#"{
+                            "agent": { "dock": "left" },
+                            "project_panel": { "dock": "right" },
+                            "outline_panel": { "dock": "right" },
+                            "collaboration_panel": { "dock": "right" },
+                            "git_panel": { "dock": "right" }
+                        }"#,
+                        cx,
+                    )
+                    .expect("agent layout settings should parse");
+            });
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.center_pane_visible, None);
+            assert!(!workspace.is_center_pane_visible(cx));
+        });
+        assert!(cx.debug_bounds("editor-region").is_none());
+
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store
+                .set_user_settings(
+                    r#"{
+                        "agent": { "dock": "right" },
+                        "project_panel": { "dock": "left" },
+                        "outline_panel": { "dock": "left" },
+                        "collaboration_panel": { "dock": "left" },
+                        "git_panel": { "dock": "left" }
+                    }"#,
+                    cx,
+                )
+                .expect("editor layout settings should parse");
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_center_pane_visible(cx));
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.restore_center_pane_visibility(Some(false), cx);
+        });
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store
+                .set_user_settings(
+                    r#"{
+                        "agent": { "dock": "left" },
+                        "project_panel": { "dock": "right" },
+                        "outline_panel": { "dock": "right" },
+                        "collaboration_panel": { "dock": "right" },
+                        "git_panel": { "dock": "right" }
+                    }"#,
+                    cx,
+                )
+                .expect("agent layout settings should parse");
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.is_center_pane_visible(cx));
+        });
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store
+                .set_user_settings(
+                    r#"{
+                        "agent": { "dock": "right" },
+                        "project_panel": { "dock": "left" },
+                        "outline_panel": { "dock": "left" },
+                        "collaboration_panel": { "dock": "left" },
+                        "git_panel": { "dock": "left" }
+                    }"#,
+                    cx,
+                )
+                .expect("editor layout settings should parse");
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.is_center_pane_visible(cx));
+        });
+
+        let (first_pane, item, pane_ids) = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.show_center_pane(window, cx);
+            let first_pane = workspace.active_pane().clone();
+            let item = cx.new(TestItem::new);
+            workspace.add_item(
+                first_pane.clone(),
+                Box::new(item.clone()),
+                None,
+                true,
+                true,
+                window,
+                cx,
+            );
+            workspace.split_pane(first_pane.clone(), SplitDirection::Right, window, cx);
+
+            let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(right_panel, window, cx);
+            workspace.open_panel::<TestPanel>(window, cx);
+
+            let pane_ids = workspace
+                .center
+                .panes()
+                .into_iter()
+                .map(Entity::entity_id)
+                .collect::<Vec<_>>();
+            (first_pane, item, pane_ids)
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_center_pane_visible(false, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.is_center_pane_visible(cx));
+            assert!(workspace.right_dock().read(cx).is_open());
+            assert!(workspace.right_dock().read(cx).visible_panel().is_some());
+            assert_ne!(workspace.zoomed_position, Some(DockPosition::Right));
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace
+                    .center
+                    .panes()
+                    .into_iter()
+                    .map(Entity::entity_id)
+                    .collect::<Vec<_>>(),
+                pane_ids
+            );
+            assert!(
+                workspace
+                    .items(cx)
+                    .any(|open_item| open_item.item_id() == item.item_id())
+            );
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.show_center_pane(window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center
+                    .panes()
+                    .into_iter()
+                    .map(Entity::entity_id)
+                    .collect::<Vec<_>>(),
+                pane_ids
+            );
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_active_pane(&first_pane, window, cx);
+            workspace.set_center_pane_visible(false, window, cx);
+            workspace.focus_center_pane(window, cx);
+            assert!(workspace.is_center_pane_visible(cx));
+        });
+    }
+    #[gpui::test]
+    async fn test_center_pane_hides_after_last_item_closes(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let pane = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.show_center_pane(window, cx);
+            let pane = workspace.active_pane().clone();
+            let item = cx.new(TestItem::new);
+            workspace.add_item(pane.clone(), Box::new(item), None, true, true, window, cx);
+            pane
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_center_pane_visible(cx));
+        });
+
+        let close_task = pane.update_in(cx, |pane, window, cx| {
+            pane.close_active_item(
+                &pane::CloseActiveItem {
+                    save_intent: Some(SaveIntent::Close),
+                    close_pinned: false,
+                },
+                window,
+                cx,
+            )
+        });
+        close_task
+            .await
+            .expect("Closing the final center item should succeed");
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.items(cx).next().is_none());
+            assert!(!workspace.is_center_pane_visible(cx));
+        });
+        assert!(cx.debug_bounds("editor-region").is_none());
+    }
+
+    #[gpui::test]
+    async fn test_toggle_center_pane_with_right_dock_closed(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(right_panel, window, cx);
+            workspace
+                .right_dock()
+                .update(cx, |dock, cx| dock.set_open(false, window, cx));
+            workspace.set_center_pane_visible(false, window, cx);
+        });
+        cx.run_until_parked();
+
+        let center_pane_button_bounds = cx
+            .debug_bounds("ICON-Split")
+            .expect("Center-pane toggle should be mounted in the status bar");
+        cx.simulate_event(MouseDownEvent {
+            position: center_pane_button_bounds.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        cx.simulate_event(MouseUpEvent {
+            position: center_pane_button_bounds.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_center_pane_visible(cx));
+            assert!(!workspace.right_dock().read(cx).is_open());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_bottom_dock_reveals_center_pane(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let bottom_panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 100, cx));
+            workspace.add_panel(bottom_panel, window, cx);
+            workspace
+                .bottom_dock()
+                .update(cx, |dock, cx| dock.set_open(false, window, cx));
+            workspace.set_center_pane_visible(false, window, cx);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_bottom_dock(window, cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.bottom_dock().read(cx).is_open());
+            assert!(workspace.is_center_pane_visible(cx));
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_center_pane_visible(false, window, cx);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_bottom_dock(window, cx);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.bottom_dock().read(cx).is_open());
+            assert!(!workspace.is_center_pane_visible(cx));
         });
     }
 

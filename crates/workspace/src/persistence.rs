@@ -374,11 +374,23 @@ pub fn read_serialized_multi_workspaces(
 }
 
 const DEFAULT_DOCK_STATE_KEY: &str = "default_dock_state";
+const DEFAULT_CENTER_PANE_VISIBLE_KEY: &str = "default_center_pane_visible";
 
 pub fn read_default_dock_state(kvp: &KeyValueStore) -> Option<DockStructure> {
     let json_str = kvp.read_kvp(DEFAULT_DOCK_STATE_KEY).log_err().flatten()?;
 
     serde_json::from_str::<DockStructure>(&json_str).ok()
+}
+
+pub fn read_default_center_pane_visible(kvp: &KeyValueStore) -> Option<bool> {
+    let json_str = kvp
+        .read_kvp(DEFAULT_CENTER_PANE_VISIBLE_KEY)
+        .log_err()
+        .flatten()?;
+
+    serde_json::from_str::<Option<bool>>(&json_str)
+        .ok()
+        .flatten()
 }
 
 pub async fn write_default_dock_state(
@@ -387,6 +399,16 @@ pub async fn write_default_dock_state(
 ) -> anyhow::Result<()> {
     let json_str = serde_json::to_string(&docks)?;
     kvp.write_kvp(DEFAULT_DOCK_STATE_KEY.to_string(), json_str)
+        .await?;
+    Ok(())
+}
+
+pub async fn write_default_center_pane_visible(
+    kvp: &KeyValueStore,
+    visibility: Option<bool>,
+) -> anyhow::Result<()> {
+    let json_str = serde_json::to_string(&visibility)?;
+    kvp.write_kvp(DEFAULT_CENTER_PANE_VISIBLE_KEY.to_string(), json_str)
         .await?;
     Ok(())
 }
@@ -1051,6 +1073,9 @@ impl Domain for WorkspaceDb {
         sql!(
             ALTER TABLE bookmarks ADD COLUMN label TEXT NOT NULL DEFAULT "";
         ),
+        sql!(
+            ALTER TABLE workspaces ADD COLUMN center_pane_visible INTEGER;
+        ),
     ];
 
     // Allow recovering from bad migration that was initially shipped to nightly
@@ -1107,7 +1132,7 @@ impl WorkspaceDb {
             identity_paths_order,
             window_bounds,
             display,
-            centered_layout,
+            (centered_layout, center_pane_visible),
             docks,
             window_id,
         ): (
@@ -1118,7 +1143,7 @@ impl WorkspaceDb {
             Option<String>,
             Option<SerializedWindowBounds>,
             Option<Uuid>,
-            Option<bool>,
+            (Option<bool>, Option<bool>),
             DockStructure,
             Option<u64>,
         ) = self
@@ -1136,6 +1161,7 @@ impl WorkspaceDb {
                     window_height,
                     display,
                     centered_layout,
+                    center_pane_visible,
                     left_dock_visible,
                     left_dock_active_panel,
                     left_dock_zoom,
@@ -1202,6 +1228,7 @@ impl WorkspaceDb {
             breakpoints: self.breakpoints(workspace_id),
             window_id,
             user_toolchains: self.user_toolchains(workspace_id, remote_connection_id),
+            center_pane_visible,
         })
     }
 
@@ -1217,7 +1244,7 @@ impl WorkspaceDb {
             identity_paths_order,
             window_bounds,
             display,
-            centered_layout,
+            (centered_layout, center_pane_visible),
             docks,
             window_id,
             remote_connection_id,
@@ -1228,7 +1255,7 @@ impl WorkspaceDb {
             Option<String>,
             Option<SerializedWindowBounds>,
             Option<Uuid>,
-            Option<bool>,
+            (Option<bool>, Option<bool>),
             DockStructure,
             Option<u64>,
             Option<i32>,
@@ -1246,6 +1273,7 @@ impl WorkspaceDb {
                     window_height,
                     display,
                     centered_layout,
+                    center_pane_visible,
                     left_dock_visible,
                     left_dock_active_panel,
                     left_dock_zoom,
@@ -1306,6 +1334,7 @@ impl WorkspaceDb {
             breakpoints: self.breakpoints(workspace_id),
             window_id,
             user_toolchains: self.user_toolchains(workspace_id, remote_connection_id),
+            center_pane_visible,
         })
     }
 
@@ -1586,6 +1615,7 @@ impl WorkspaceDb {
                         identity_paths,
                         identity_paths_order,
                         remote_connection_id,
+                        center_pane_visible,
                         left_dock_visible,
                         left_dock_active_panel,
                         left_dock_zoom,
@@ -1599,7 +1629,7 @@ impl WorkspaceDb {
                         window_id,
                         timestamp
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, CURRENT_TIMESTAMP)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, CURRENT_TIMESTAMP)
                     ON CONFLICT DO
                     UPDATE SET
                         paths = ?2,
@@ -1607,17 +1637,18 @@ impl WorkspaceDb {
                         identity_paths = ?4,
                         identity_paths_order = ?5,
                         remote_connection_id = ?6,
-                        left_dock_visible = ?7,
-                        left_dock_active_panel = ?8,
-                        left_dock_zoom = ?9,
-                        right_dock_visible = ?10,
-                        right_dock_active_panel = ?11,
-                        right_dock_zoom = ?12,
-                        bottom_dock_visible = ?13,
-                        bottom_dock_active_panel = ?14,
-                        bottom_dock_zoom = ?15,
-                        session_id = ?16,
-                        window_id = ?17,
+                        center_pane_visible = ?7,
+                        left_dock_visible = ?8,
+                        left_dock_active_panel = ?9,
+                        left_dock_zoom = ?10,
+                        right_dock_visible = ?11,
+                        right_dock_active_panel = ?12,
+                        right_dock_zoom = ?13,
+                        bottom_dock_visible = ?14,
+                        bottom_dock_active_panel = ?15,
+                        bottom_dock_zoom = ?16,
+                        session_id = ?17,
+                        window_id = ?18,
                         timestamp = CURRENT_TIMESTAMP
                 );
                 let mut prepared_query = conn.exec_bound(query)?;
@@ -1628,6 +1659,7 @@ impl WorkspaceDb {
                     identity_paths.as_ref().map(|paths| paths.paths.clone()),
                     identity_paths.as_ref().map(|paths| paths.order.clone()),
                     remote_connection_id,
+                    workspace.center_pane_visible,
                     workspace.docks,
                     workspace.session_id,
                     workspace.window_id,
@@ -2971,6 +3003,7 @@ mod tests {
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         db.save_workspace(workspace.clone()).await;
@@ -3094,6 +3127,7 @@ mod tests {
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         db.save_workspace(workspace.clone()).await;
@@ -3130,6 +3164,7 @@ mod tests {
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         db.save_workspace(workspace_without_breakpoint.clone())
@@ -3230,6 +3265,7 @@ mod tests {
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         let workspace_2 = SerializedWorkspace {
@@ -3247,6 +3283,7 @@ mod tests {
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         db.save_workspace(workspace_1.clone()).await;
@@ -3356,6 +3393,7 @@ mod tests {
             session_id: None,
             window_id: Some(999),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         db.save_workspace(workspace.clone()).await;
@@ -3392,6 +3430,7 @@ mod tests {
             session_id: None,
             window_id: Some(1),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         let mut workspace_2 = SerializedWorkspace {
@@ -3409,6 +3448,7 @@ mod tests {
             session_id: None,
             window_id: Some(2),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         db.save_workspace(workspace_1.clone()).await;
@@ -3453,6 +3493,7 @@ mod tests {
             session_id: None,
             window_id: Some(3),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         db.save_workspace(workspace_3.clone()).await;
@@ -3493,6 +3534,7 @@ mod tests {
             session_id: Some("session-id-1".to_owned()),
             window_id: Some(10),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         let workspace_2 = SerializedWorkspace {
@@ -3510,6 +3552,7 @@ mod tests {
             session_id: Some("session-id-1".to_owned()),
             window_id: Some(20),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         let workspace_3 = SerializedWorkspace {
@@ -3527,6 +3570,7 @@ mod tests {
             session_id: Some("session-id-2".to_owned()),
             window_id: Some(30),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         let workspace_4 = SerializedWorkspace {
@@ -3544,6 +3588,7 @@ mod tests {
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         let connection_id = db
@@ -3572,6 +3617,7 @@ mod tests {
             session_id: Some("session-id-2".to_owned()),
             window_id: Some(50),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         let workspace_6 = SerializedWorkspace {
@@ -3589,6 +3635,7 @@ mod tests {
             session_id: Some("session-id-3".to_owned()),
             window_id: Some(60),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         db.save_workspace(workspace_1.clone()).await;
@@ -3648,6 +3695,7 @@ mod tests {
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         }
     }
 
@@ -3691,6 +3739,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(window_id),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         })
         .collect::<Vec<_>>();
 
@@ -3790,6 +3839,7 @@ mod tests {
             session_id: session_id.map(|s| s.to_owned()),
             window_id: Some(id),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         }
     }
 
@@ -3814,7 +3864,74 @@ mod tests {
             session_id: None,
             window_id: Some(id),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         }
+    }
+
+    #[gpui::test]
+    async fn test_center_pane_visibility_round_trip() {
+        let db = WorkspaceDb::open_test_db("test_center_pane_visibility_round_trip").await;
+
+        let mut hidden = workspace_with(1, &[Path::new("/hidden")], empty_pane_group(), None);
+        hidden.center_pane_visible = Some(false);
+        db.save_workspace(hidden).await;
+        assert_eq!(
+            db.workspace_for_roots(&[Path::new("/hidden")])
+                .expect("hidden workspace should be restored")
+                .center_pane_visible,
+            Some(false)
+        );
+
+        let mut visible = workspace_with(2, &[Path::new("/visible")], empty_pane_group(), None);
+        visible.center_pane_visible = Some(true);
+        db.save_workspace(visible).await;
+        assert_eq!(
+            db.workspace_for_id(WorkspaceId(2))
+                .expect("visible workspace should be restored")
+                .center_pane_visible,
+            Some(true)
+        );
+
+        db.write(|connection| {
+            connection
+                .exec_bound(sql!(
+                    UPDATE workspaces
+                    SET center_pane_visible = NULL
+                    WHERE workspace_id = ?
+                ))
+                .expect("legacy visibility update should prepare")(WorkspaceId(2))
+            .expect("legacy visibility update should execute");
+        })
+        .await;
+        assert_eq!(
+            db.workspace_for_id(WorkspaceId(2))
+                .expect("legacy workspace should be restored")
+                .center_pane_visible,
+            None
+        );
+
+        let kvp = KeyValueStore::open_test_db("test_center_pane_visibility_round_trip_kvp").await;
+        assert_eq!(read_default_center_pane_visible(&kvp), None);
+        kvp.write_kvp(
+            DEFAULT_CENTER_PANE_VISIBLE_KEY.to_string(),
+            "null".to_string(),
+        )
+        .await
+        .expect("null visibility should be written");
+        assert_eq!(read_default_center_pane_visible(&kvp), None);
+
+        write_default_center_pane_visible(&kvp, Some(false))
+            .await
+            .expect("hidden default visibility should be written");
+        assert_eq!(read_default_center_pane_visible(&kvp), Some(false));
+        write_default_center_pane_visible(&kvp, Some(true))
+            .await
+            .expect("visible default visibility should be written");
+        assert_eq!(read_default_center_pane_visible(&kvp), Some(true));
+        write_default_center_pane_visible(&kvp, None)
+            .await
+            .expect("default visibility should be cleared");
+        assert_eq!(read_default_center_pane_visible(&kvp), None);
     }
 
     async fn local_recent_workspace(
@@ -4072,6 +4189,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(window_id),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         })
         .collect::<Vec<_>>();
 
@@ -4435,6 +4553,7 @@ mod tests {
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         };
 
         // Save the workspace (this creates the record with empty paths)
@@ -4513,6 +4632,7 @@ mod tests {
                 breakpoints: Default::default(),
                 window_id: Some(*window_id),
                 user_toolchains: Default::default(),
+                center_pane_visible: None,
             })
             .await;
         }
@@ -4800,6 +4920,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(99),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         })
         .await;
 
@@ -4897,6 +5018,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(window_id_val),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         })
         .await;
 
@@ -4915,6 +5037,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(window_id_val),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         })
         .await;
 
@@ -4995,6 +5118,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(88),
             user_toolchains: Default::default(),
+            center_pane_visible: None,
         })
         .await;
         cx.run_until_parked();

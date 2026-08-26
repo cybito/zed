@@ -173,6 +173,48 @@ async fn test_opening_file(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_opening_file_reveals_center_pane(cx: &mut gpui::TestAppContext) {
+    init_test_with_editor(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/src"),
+        json!({
+            "test": {
+                "first.rs": "// First Rust file",
+            }
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/src").as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .expect("workspace window should exist");
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    workspace.update(cx, |workspace, cx| {
+        workspace.restore_center_pane_visibility(Some(false), cx);
+    });
+    workspace.read_with(cx, |workspace, cx| {
+        assert!(!workspace.is_center_pane_visible(cx));
+    });
+
+    toggle_expand_dir(&panel, "src/test", cx);
+    select_path(&panel, "src/test/first.rs", cx);
+    panel.update_in(cx, |panel, window, cx| panel.open(&Open, window, cx));
+    cx.run_until_parked();
+
+    workspace.read_with(cx, |workspace, cx| {
+        assert!(workspace.is_center_pane_visible(cx));
+    });
+    ensure_single_file_is_opened(&workspace, "test/first.rs", cx);
+}
+
+#[gpui::test]
 async fn test_file_history_action_uses_focused_project_panel_selection(
     cx: &mut gpui::TestAppContext,
 ) {
