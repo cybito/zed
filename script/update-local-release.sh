@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# update-local-release.sh — 把 local/custom 分支合并到最新上游 stable release 并重新编译。
+# update-local-release.sh — 把 local/custom 分支合并到最新上游正式 release 并重新编译。
 #
 # 本分支在 upstream main/release 之上维护少量本地提交（见 git log --first-parent）。
 # 升级 = 拉取最新发行 tag 并 merge 进本分支；冲突时脚本停下并给出指引。
@@ -52,11 +52,11 @@ fi
 if [[ -n "$PINNED" ]]; then
     TAG="$PINNED"
 else
-    # 只认形如 vX.Y.Z 的 stable 发行 tag（排除 -pre/-nightly 等带连字符的）
-    TAG="$("${GIT[@]}" ls-remote --tags --refs "$REMOTE" 'v*' \
-        | cut -d'/' -f3 \
-        | grep -Ev -- '-' \
-        | sort -V | tail -n1)"
+    # Git tag 列表也包含预发布构建的无后缀 tag；以 GitHub 的 latest release
+    # 元数据作为正式发行的唯一来源。
+    TAG="$(curl --fail --silent --show-error --location \
+        https://api.github.com/repos/zed-industries/zed/releases/latest \
+        | sed -nE 's/^[[:space:]]*"tag_name":[[:space:]]*"([^"]+)".*/\1/p')"
 fi
 [[ -n "$TAG" ]] || { echo "ERROR: 未找到发行 tag" >&2; exit 1; }
 echo "==> target release: $TAG"
