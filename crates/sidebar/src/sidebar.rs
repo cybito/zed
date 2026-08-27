@@ -2544,6 +2544,14 @@ impl Sidebar {
             .relative()
             .w_full()
             .cursor_grab()
+            .on_hover(cx.listener(move |this, is_hovered: &bool, _window, cx| {
+                if *is_hovered {
+                    this.hovered_thread_index = Some(ix);
+                } else if this.hovered_thread_index == Some(ix) {
+                    this.hovered_thread_index = None;
+                }
+                cx.notify();
+            }))
             .on_drag(
                 DraggedSidebarEntry {
                     id,
