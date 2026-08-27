@@ -6,11 +6,15 @@
 # 升级 = 拉取最新发行 tag 并 merge 进本分支；冲突时脚本停下并给出指引。
 #
 # 用法：
-#   script/update-local-release.sh                # 合并最新 release + 编译 bundle
-#   script/update-local-release.sh --install      # 编译并安装到 /Applications
-#   script/update-local-release.sh --tag v0.210.2 # 锁定某个版本
-#   script/update-local-release.sh --no-build     # 只做合并，不编译
+#   script/update-local-release.sh                  # 合并最新 release + 编译 bundle
+#   script/update-local-release.sh --install        # 合并最新 release + 编译并安装到 /Applications
+#   script/update-local-release.sh --tag v0.210.2   # 锁定某个版本
+#   script/update-local-release.sh --no-build        # 只做合并，不编译
 #
+# 仅使用当前本地代码编译/安装（不会拉取或合并上游）：
+#   ./script/bundle-mac                            # 只编译
+#   ./script/bundle-mac -i                         # 编译并安装到 /Applications
+#   ./script/bundle-mac -d -i                      # Debug 构建并安装
 set -euo pipefail
 
 BRANCH=local/custom
