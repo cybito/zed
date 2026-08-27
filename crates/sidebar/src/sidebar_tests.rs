@@ -603,6 +603,25 @@ fn visible_entries_as_strings(
     })
 }
 
+fn sidebar_entry_ids_in_group(
+    sidebar: &Entity<Sidebar>,
+    project_group_key: &ProjectGroupKey,
+    cx: &mut gpui::VisualTestContext,
+) -> Vec<SidebarEntryId> {
+    sidebar.read_with(cx, |sidebar, _cx| {
+        let Some(header_index) = sidebar.contents.entries.iter().position(|entry| {
+            matches!(entry, ListEntry::ProjectHeader { key, .. } if key == project_group_key)
+        }) else {
+            return Vec::new();
+        };
+        sidebar.contents.entries[header_index + 1..]
+            .iter()
+            .take_while(|entry| !matches!(entry, ListEntry::ProjectHeader { .. }))
+            .filter_map(ListEntry::sidebar_entry_id)
+            .collect()
+    })
+}
+
 #[gpui::test]
 async fn test_thread_metadata_update_preserves_sticky_header_measurements(cx: &mut TestAppContext) {
     let (fs, project_a) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
@@ -791,6 +810,361 @@ async fn test_serialization_round_trip(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_sidebar_rows_keep_creation_order_after_interaction(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    let project_group_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let newest_creation = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0).unwrap();
+    let oldest_creation = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap();
+    let terminal_id = panel
+        .update_in(cx, |panel, window, cx| {
+            panel.insert_test_terminal("Stable Terminal", true, window, cx)
+        })
+        .expect("terminal should be inserted");
+
+    let newer_session_id = acp::SessionId::new(Arc::from("newer-stable-thread"));
+    save_thread_metadata(
+        newer_session_id.clone(),
+        Some("Newer Stable Thread".into()),
+        oldest_creation,
+        Some(newest_creation),
+        Some(oldest_creation),
+        &project,
+        cx,
+    );
+    let older_session_id = acp::SessionId::new(Arc::from("older-stable-thread"));
+    save_thread_metadata(
+        older_session_id.clone(),
+        Some("Older Stable Thread".into()),
+        newest_creation,
+        Some(oldest_creation),
+        Some(newest_creation),
+        &project,
+        cx,
+    );
+
+    cx.update(|_, cx| {
+        let mut terminal_metadata = TerminalThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry(terminal_id)
+            .cloned()
+            .expect("terminal metadata should be persisted");
+        terminal_metadata.created_at = newest_creation;
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.save(terminal_metadata, cx);
+        });
+    });
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    let (newer_thread_id, older_thread_id) = cx.update(|_, cx| {
+        let store = ThreadMetadataStore::global(cx).read(cx);
+        let newer_thread_id = store
+            .entry_by_session(&newer_session_id)
+            .expect("newer metadata should be present")
+            .thread_id;
+        let older_thread_id = store
+            .entry_by_session(&older_session_id)
+            .expect("older metadata should be present")
+            .thread_id;
+        (newer_thread_id, older_thread_id)
+    });
+    let mut newest_ids = vec![
+        SidebarEntryId::Thread(newer_thread_id),
+        SidebarEntryId::Terminal(terminal_id),
+    ];
+    newest_ids.sort();
+    newest_ids.push(SidebarEntryId::Thread(older_thread_id));
+    assert_eq!(
+        sidebar_entry_ids_in_group(&sidebar, &project_group_key, cx),
+        newest_ids
+    );
+
+    let later_timestamp = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 4, 0, 0, 0).unwrap();
+    cx.update(|_, cx| {
+        let mut metadata = ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry_by_session(&older_session_id)
+            .cloned()
+            .expect("older metadata should be present");
+        metadata.updated_at = later_timestamp;
+        metadata.interacted_at = Some(later_timestamp);
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.save(metadata, cx);
+        });
+    });
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        sidebar_entry_ids_in_group(&sidebar, &project_group_key, cx),
+        newest_ids
+    );
+
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    assert_eq!(
+        sidebar_entry_ids_in_group(&sidebar, &project_group_key, cx),
+        newest_ids
+    );
+}
+
+#[gpui::test]
+async fn test_sidebar_row_reordering_persists_when_workspace_reopens(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    multi_workspace.update_in(cx, |multi_workspace, _, cx| {
+        multi_workspace
+            .workspace()
+            .update(cx, |workspace, _| workspace.set_random_database_id());
+    });
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let project_group_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+    let older = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap();
+    let newer = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap();
+    let older_session_id = acp::SessionId::new(Arc::from("reopen-older-thread"));
+    let newer_session_id = acp::SessionId::new(Arc::from("reopen-newer-thread"));
+    save_thread_metadata(
+        older_session_id.clone(),
+        Some("Older Reopen Thread".into()),
+        older,
+        Some(older),
+        None,
+        &project,
+        cx,
+    );
+    save_thread_metadata(
+        newer_session_id.clone(),
+        Some("Newer Reopen Thread".into()),
+        newer,
+        Some(newer),
+        None,
+        &project,
+        cx,
+    );
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    let (older_thread_id, newer_thread_id) = cx.update(|_, cx| {
+        let store = ThreadMetadataStore::global(cx).read(cx);
+        (
+            store
+                .entry_by_session(&older_session_id)
+                .expect("older metadata should be present")
+                .thread_id,
+            store
+                .entry_by_session(&newer_session_id)
+                .expect("newer metadata should be present")
+                .thread_id,
+        )
+    });
+    let older_entry_id = SidebarEntryId::Thread(older_thread_id);
+    let newer_entry_id = SidebarEntryId::Thread(newer_thread_id);
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.reorder_entry(older_entry_id, newer_entry_id, DropPosition::Before, cx);
+    });
+    cx.run_until_parked();
+
+    let reopened_sidebar =
+        cx.update(|window, cx| cx.new(|cx| Sidebar::new(multi_workspace.clone(), window, cx)));
+    cx.run_until_parked();
+
+    let stale_sidebar_state = serde_json::to_string(&SerializedSidebar {
+        width: None,
+        active_view: SerializedSidebarView::ThreadList,
+        entry_order: vec![newer_entry_id, older_entry_id],
+    })
+    .expect("stale sidebar state should serialize");
+    reopened_sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.restore_serialized_state(&stale_sidebar_state, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        sidebar_entry_ids_in_group(&reopened_sidebar, &project_group_key, cx),
+        vec![older_entry_id, newer_entry_id]
+    );
+}
+
+#[gpui::test]
+async fn test_sidebar_row_reordering_persists_for_threads_and_terminals(cx: &mut TestAppContext) {
+    agent_ui::test_support::init_test(cx);
+    cx.update(|cx| {
+        cx.set_global(agent_ui::MaxIdleRetainedThreads(1));
+        ThreadStore::init_global(cx);
+        ThreadMetadataStore::init_global(cx);
+        language_model::LanguageModelRegistry::test(cx);
+        prompt_store::init(cx);
+    });
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/project-a", serde_json::json!({ "src": {} }))
+        .await;
+    fs.insert_tree("/project-b", serde_json::json!({ "src": {} }))
+        .await;
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+    let project_a = project::Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
+    let project_b = project::Project::test(fs, ["/project-b".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace.test_add_workspace(project_b.clone(), window, cx);
+    });
+
+    let newest = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 3, 0, 0, 0).unwrap();
+    let middle = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap();
+    let oldest = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap();
+    let terminal_id = panel
+        .update_in(cx, |panel, window, cx| {
+            panel.insert_test_terminal("Reorder Terminal", true, window, cx)
+        })
+        .expect("terminal should be inserted");
+    let first_session_id = acp::SessionId::new(Arc::from("first-reorder-thread"));
+    save_thread_metadata(
+        first_session_id.clone(),
+        Some("First Reorder Thread".into()),
+        oldest,
+        Some(newest),
+        None,
+        &project_a,
+        cx,
+    );
+    let second_session_id = acp::SessionId::new(Arc::from("second-reorder-thread"));
+    save_thread_metadata(
+        second_session_id.clone(),
+        Some("Second Reorder Thread".into()),
+        newest,
+        Some(oldest),
+        None,
+        &project_a,
+        cx,
+    );
+    let other_session_id = acp::SessionId::new(Arc::from("other-project-thread"));
+    save_thread_metadata(
+        other_session_id.clone(),
+        Some("Other Project Thread".into()),
+        oldest,
+        Some(middle),
+        None,
+        &project_b,
+        cx,
+    );
+    cx.update(|_, cx| {
+        let mut terminal_metadata = TerminalThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry(terminal_id)
+            .cloned()
+            .expect("terminal metadata should be persisted");
+        terminal_metadata.created_at = middle;
+        TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+            store.save(terminal_metadata, cx);
+        });
+    });
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    let (first_thread_id, second_thread_id, other_thread_id) = cx.update(|_, cx| {
+        let store = ThreadMetadataStore::global(cx).read(cx);
+        (
+            store
+                .entry_by_session(&first_session_id)
+                .expect("first metadata should be present")
+                .thread_id,
+            store
+                .entry_by_session(&second_session_id)
+                .expect("second metadata should be present")
+                .thread_id,
+            store
+                .entry_by_session(&other_session_id)
+                .expect("other metadata should be present")
+                .thread_id,
+        )
+    });
+    let first_id = SidebarEntryId::Thread(first_thread_id);
+    let second_id = SidebarEntryId::Thread(second_thread_id);
+    let terminal_entry_id = SidebarEntryId::Terminal(terminal_id);
+    let other_id = SidebarEntryId::Thread(other_thread_id);
+    let project_a_key = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
+    let project_b_key = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.reorder_entry(terminal_entry_id, first_id, DropPosition::Before, cx);
+    });
+    assert_eq!(
+        sidebar_entry_ids_in_group(&sidebar, &project_a_key, cx),
+        vec![terminal_entry_id, first_id, second_id]
+    );
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.reorder_entry(second_id, terminal_entry_id, DropPosition::After, cx);
+    });
+    assert_eq!(
+        sidebar_entry_ids_in_group(&sidebar, &project_a_key, cx),
+        vec![terminal_entry_id, second_id, first_id]
+    );
+
+    let serialized = sidebar
+        .read_with(cx, |sidebar, cx| sidebar.serialized_state(cx))
+        .expect("sidebar state should serialize");
+    let restored_sidebar =
+        cx.update(|window, cx| cx.new(|cx| Sidebar::new(multi_workspace.clone(), window, cx)));
+    cx.run_until_parked();
+    restored_sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.restore_serialized_state(&serialized, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        sidebar_entry_ids_in_group(&restored_sidebar, &project_a_key, cx),
+        vec![terminal_entry_id, second_id, first_id]
+    );
+
+    let new_session_id = acp::SessionId::new(Arc::from("new-reorder-thread"));
+    save_thread_metadata(
+        new_session_id.clone(),
+        Some("New Reorder Thread".into()),
+        oldest,
+        Some(chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 4, 0, 0, 0).unwrap()),
+        None,
+        &project_a,
+        cx,
+    );
+    restored_sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+    let new_thread_id = cx.update(|_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry_by_session(&new_session_id)
+            .expect("new metadata should be present")
+            .thread_id
+    });
+    assert_eq!(
+        sidebar_entry_ids_in_group(&restored_sidebar, &project_a_key, cx),
+        vec![
+            SidebarEntryId::Thread(new_thread_id),
+            terminal_entry_id,
+            second_id,
+            first_id,
+        ]
+    );
+
+    let project_a_before_cross_group_drop =
+        sidebar_entry_ids_in_group(&restored_sidebar, &project_a_key, cx);
+    let project_b_before_cross_group_drop =
+        sidebar_entry_ids_in_group(&restored_sidebar, &project_b_key, cx);
+    restored_sidebar.update(cx, |sidebar, cx| {
+        sidebar.reorder_entry(first_id, other_id, DropPosition::Before, cx);
+    });
+    assert_eq!(
+        sidebar_entry_ids_in_group(&restored_sidebar, &project_a_key, cx),
+        project_a_before_cross_group_drop
+    );
+    assert_eq!(
+        sidebar_entry_ids_in_group(&restored_sidebar, &project_b_key, cx),
+        project_b_before_cross_group_drop
+    );
+}
+
+#[gpui::test]
 async fn test_restore_serialized_archive_view_does_not_panic(cx: &mut TestAppContext) {
     // A regression test to ensure that restoring a serialized archive view does not panic.
     let project = init_test_project_with_agent_panel("/my-project", cx).await;
@@ -804,6 +1178,7 @@ async fn test_restore_serialized_archive_view_does_not_panic(cx: &mut TestAppCon
     let serialized = serde_json::to_string(&SerializedSidebar {
         width: Some(400.0),
         active_view: SerializedSidebarView::History,
+        entry_order: Vec::new(),
     })
     .expect("serialization should succeed");
 

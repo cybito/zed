@@ -104,6 +104,7 @@ gpui::actions!(
 const DEFAULT_WIDTH: Pixels = px(300.0);
 const MIN_WIDTH: Pixels = px(200.0);
 const MAX_WIDTH: Pixels = px(800.0);
+const ENTRY_ORDER_KVP_SCOPE: &str = "sidebar_entry_order";
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum SerializedSidebarView {
@@ -119,12 +120,20 @@ enum NewEntryTarget {
     Terminal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+enum SidebarEntryId {
+    Thread(ThreadId),
+    Terminal(TerminalId),
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct SerializedSidebar {
     #[serde(default)]
     width: Option<f32>,
     #[serde(default)]
     active_view: SerializedSidebarView,
+    #[serde(default)]
+    entry_order: Vec<SidebarEntryId>,
 }
 
 #[derive(Debug, Default)]
@@ -402,6 +411,67 @@ enum ListEntry {
     },
     Thread(Arc<ThreadEntry>),
     Terminal(TerminalEntry),
+}
+
+impl ListEntry {
+    fn sidebar_entry_id(&self) -> Option<SidebarEntryId> {
+        match self {
+            ListEntry::Thread(thread) => Some(SidebarEntryId::Thread(thread.metadata.thread_id)),
+            ListEntry::Terminal(terminal) => {
+                Some(SidebarEntryId::Terminal(terminal.metadata.terminal_id))
+            }
+            ListEntry::ProjectHeader { .. } => None,
+        }
+    }
+}
+
+impl ListEntry {
+    fn creation_time(&self) -> Option<DateTime<Utc>> {
+        match self {
+            ListEntry::Thread(thread) => Some(
+                thread
+                    .metadata
+                    .created_at
+                    .unwrap_or(thread.metadata.updated_at),
+            ),
+            ListEntry::Terminal(terminal) => Some(terminal.metadata.created_at),
+            ListEntry::ProjectHeader { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DraggedSidebarEntry {
+    id: SidebarEntryId,
+    project_group_key: ProjectGroupKey,
+    title: SharedString,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DropPosition {
+    Before,
+    After,
+}
+
+struct DraggedSidebarEntryView {
+    title: SharedString,
+}
+
+impl Render for DraggedSidebarEntryView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .w(px(260.))
+            .px_2()
+            .py_1()
+            .bg(cx.theme().colors().panel_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .child(
+                Label::new(self.title.clone())
+                    .size(LabelSize::Small)
+                    .truncate(),
+            )
+    }
 }
 
 #[derive(Clone)]
@@ -735,10 +805,13 @@ pub struct Sidebar {
     multi_workspace: WeakEntity<MultiWorkspace>,
     width: Pixels,
     focus_handle: FocusHandle,
+    has_persisted_entry_order: bool,
+
     filter_editor: Entity<Editor>,
     thread_rename_editor: Entity<Editor>,
     list_state: ListState,
     contents: SidebarContents,
+    entry_order: Vec<SidebarEntryId>,
     /// The index of the list item that currently has the keyboard focus
     ///
     /// Note: This is NOT the same as the active item.
@@ -797,6 +870,10 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let persisted_entry_order = Self::load_persisted_entry_order(&multi_workspace, cx);
+        let has_persisted_entry_order = persisted_entry_order.is_some();
+        let entry_order = persisted_entry_order.unwrap_or_default();
+
         let focus_handle = cx.focus_handle();
         cx.on_focus_in(&focus_handle, window, Self::focus_in)
             .detach();
@@ -888,6 +965,9 @@ impl Sidebar {
 
         Self {
             multi_workspace: multi_workspace.downgrade(),
+            entry_order,
+            has_persisted_entry_order,
+
             width: DEFAULT_WIDTH,
             focus_handle,
             filter_editor,
@@ -921,6 +1001,43 @@ impl Sidebar {
             import_banners_use_verbose_labels: None,
             cross_channel_import_channels: Vec::new(),
         }
+    }
+
+    fn load_persisted_entry_order(
+        multi_workspace: &Entity<MultiWorkspace>,
+        cx: &App,
+    ) -> Option<Vec<SidebarEntryId>> {
+        let workspace_id = multi_workspace
+            .read(cx)
+            .workspace()
+            .read(cx)
+            .database_id()?;
+        db::kvp::KeyValueStore::global(cx)
+            .scoped(ENTRY_ORDER_KVP_SCOPE)
+            .read(&i64::from(workspace_id).to_string())
+            .log_err()
+            .flatten()
+            .and_then(|serialized| serde_json::from_str(&serialized).log_err())
+    }
+
+    fn persist_entry_order(&self, cx: &mut Context<Self>) {
+        let Some(multi_workspace) = self.multi_workspace.upgrade() else {
+            return;
+        };
+        let Some(workspace_id) = multi_workspace.read(cx).workspace().read(cx).database_id() else {
+            return;
+        };
+        let Some(serialized) = serde_json::to_string(&self.entry_order).log_err() else {
+            return;
+        };
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        cx.background_spawn(async move {
+            kvp.scoped(ENTRY_ORDER_KVP_SCOPE)
+                .write(i64::from(workspace_id).to_string(), serialized)
+                .await
+                .log_err();
+        })
+        .detach();
     }
 
     fn serialize(&mut self, cx: &mut Context<Self>) {
@@ -1368,6 +1485,12 @@ impl Sidebar {
         let mut project_header_indices: Vec<usize> = Vec::new();
         let mut seen_thread_ids: HashSet<agent_ui::ThreadId> = HashSet::new();
         let mut seen_terminal_ids: HashSet<TerminalId> = HashSet::new();
+        let entry_ranks: HashMap<SidebarEntryId, usize> = self
+            .entry_order
+            .iter()
+            .enumerate()
+            .map(|(rank, id)| (*id, rank))
+            .collect();
 
         let has_open_projects = workspaces
             .iter()
@@ -1749,12 +1872,6 @@ impl Sidebar {
                         notified_threads.remove(&thread.metadata.thread_id);
                     }
                 }
-
-                threads.sort_by(|a, b| {
-                    let a_time = Self::thread_display_time(&a.metadata);
-                    let b_time = Self::thread_display_time(&b.metadata);
-                    b_time.cmp(&a_time)
-                });
             } else {
                 for info in live_infos {
                     if info.status == AgentThreadStatus::Running {
@@ -1893,10 +2010,11 @@ impl Sidebar {
                     has_threads,
                 });
 
-                Self::push_entries_by_display_time(
+                Self::push_entries_in_sidebar_order(
                     &mut entries,
                     matched_terminals,
                     matched_threads,
+                    &entry_ranks,
                     &mut current_session_ids,
                     &mut current_thread_ids,
                 );
@@ -1943,10 +2061,11 @@ impl Sidebar {
                     continue;
                 }
 
-                Self::push_entries_by_display_time(
+                Self::push_entries_in_sidebar_order(
                     &mut entries,
                     terminals,
                     threads,
+                    &entry_ranks,
                     &mut current_session_ids,
                     &mut current_thread_ids,
                 );
@@ -2017,6 +2136,126 @@ impl Sidebar {
             });
         }
 
+        cx.notify();
+    }
+
+    fn project_group_key_for_entry(&self, entry_index: usize) -> Option<ProjectGroupKey> {
+        self.contents
+            .entries
+            .get(..entry_index)?
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                ListEntry::ProjectHeader { key, .. } => Some(key.clone()),
+                ListEntry::Thread(_) | ListEntry::Terminal(_) => None,
+            })
+    }
+
+    fn reorder_entry(
+        &mut self,
+        dragged: SidebarEntryId,
+        target: SidebarEntryId,
+        position: DropPosition,
+        cx: &mut Context<Self>,
+    ) {
+        if dragged == target {
+            return;
+        }
+
+        let Some(dragged_index) = self
+            .contents
+            .entries
+            .iter()
+            .position(|entry| entry.sidebar_entry_id() == Some(dragged))
+        else {
+            return;
+        };
+        let Some(target_index) = self
+            .contents
+            .entries
+            .iter()
+            .position(|entry| entry.sidebar_entry_id() == Some(target))
+        else {
+            return;
+        };
+        let Some(project_group_key) = self.project_group_key_for_entry(dragged_index) else {
+            return;
+        };
+        if self.project_group_key_for_entry(target_index) != Some(project_group_key.clone()) {
+            return;
+        }
+
+        let Some(header_index) = (0..=dragged_index).rev().find(|&index| {
+            matches!(
+                self.contents.entries.get(index),
+                Some(ListEntry::ProjectHeader { .. })
+            )
+        }) else {
+            return;
+        };
+        let mut group_entry_ids: Vec<_> = self.contents.entries[header_index + 1..]
+            .iter()
+            .take_while(|entry| !matches!(entry, ListEntry::ProjectHeader { .. }))
+            .filter_map(ListEntry::sidebar_entry_id)
+            .collect();
+        let original_group_entry_ids = group_entry_ids.clone();
+
+        let Some(dragged_group_index) = group_entry_ids.iter().position(|id| *id == dragged) else {
+            return;
+        };
+        group_entry_ids.remove(dragged_group_index);
+        let Some(target_group_index) = group_entry_ids.iter().position(|id| *id == target) else {
+            return;
+        };
+        let insertion_index = match position {
+            DropPosition::Before => target_group_index,
+            DropPosition::After => target_group_index + 1,
+        };
+        group_entry_ids.insert(insertion_index, dragged);
+
+        if group_entry_ids == original_group_entry_ids {
+            return;
+        }
+
+        let selected_entry_id = self
+            .selection
+            .and_then(|index| self.contents.entries.get(index))
+            .and_then(ListEntry::sidebar_entry_id);
+        let group_entry_id_set: HashSet<_> = original_group_entry_ids.iter().copied().collect();
+        let first_group_rank = self
+            .entry_order
+            .iter()
+            .position(|id| group_entry_id_set.contains(id));
+        let insertion_rank = first_group_rank.map_or(self.entry_order.len(), |rank| {
+            self.entry_order[..rank]
+                .iter()
+                .filter(|id| !group_entry_id_set.contains(id))
+                .count()
+        });
+        let mut entry_order: Vec<_> = self
+            .entry_order
+            .iter()
+            .copied()
+            .filter(|id| !group_entry_id_set.contains(id))
+            .collect();
+        let insertion_rank = insertion_rank.min(entry_order.len());
+        entry_order.splice(insertion_rank..insertion_rank, group_entry_ids);
+        self.entry_order = entry_order;
+        self.has_persisted_entry_order = true;
+
+        self.update_entries(cx);
+        self.selection = selected_entry_id.and_then(|id| {
+            self.contents
+                .entries
+                .iter()
+                .position(|entry| entry.sidebar_entry_id() == Some(id))
+        });
+        if let Some(selection) = self.selection {
+            self.list_state.scroll_to_reveal_item(selection);
+        }
+        self.persist_entry_order(cx);
+
+        self.serialize(cx);
         cx.notify();
     }
 
@@ -2214,10 +2453,20 @@ impl Sidebar {
                     cx,
                 )
             }
-            ListEntry::Thread(thread) => self.render_thread(ix, thread, is_active, is_selected, cx),
-            ListEntry::Terminal(terminal) => {
-                self.render_terminal(ix, terminal, is_active, is_selected, cx)
-            }
+            ListEntry::Thread(thread) => self.render_draggable_sidebar_entry(
+                ix,
+                SidebarEntryId::Thread(thread.metadata.thread_id),
+                thread.metadata.display_title(),
+                self.render_thread(ix, thread, is_active, is_selected, cx),
+                cx,
+            ),
+            ListEntry::Terminal(terminal) => self.render_draggable_sidebar_entry(
+                ix,
+                SidebarEntryId::Terminal(terminal.metadata.terminal_id),
+                terminal.metadata.display_title(),
+                self.render_terminal(ix, terminal, is_active, is_selected, cx),
+                cx,
+            ),
         };
 
         if is_group_header_after_first {
@@ -2230,6 +2479,94 @@ impl Sidebar {
         } else {
             rendered
         }
+    }
+
+    fn render_draggable_sidebar_entry(
+        &self,
+        ix: usize,
+        id: SidebarEntryId,
+        title: SharedString,
+        entry: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !self.filter_editor.read(cx).text(cx).is_empty() {
+            return entry;
+        }
+        let Some(project_group_key) = self.project_group_key_for_entry(ix) else {
+            return entry;
+        };
+
+        let top_drop_zone = div()
+            .flex_1()
+            .w_full()
+            .drag_over::<DraggedSidebarEntry>({
+                let project_group_key = project_group_key.clone();
+                move |style, dragged: &DraggedSidebarEntry, _window, cx| {
+                    if dragged.id != id && dragged.project_group_key == project_group_key {
+                        style
+                            .border_t_2()
+                            .border_color(cx.theme().colors().border_focused)
+                    } else {
+                        style
+                    }
+                }
+            })
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedSidebarEntry, _window, cx| {
+                    this.reorder_entry(dragged.id, id, DropPosition::Before, cx);
+                }),
+            );
+        let bottom_drop_zone = div()
+            .flex_1()
+            .w_full()
+            .drag_over::<DraggedSidebarEntry>({
+                let project_group_key = project_group_key.clone();
+                move |style, dragged: &DraggedSidebarEntry, _window, cx| {
+                    if dragged.id != id && dragged.project_group_key == project_group_key {
+                        style
+                            .border_b_2()
+                            .border_color(cx.theme().colors().border_focused)
+                    } else {
+                        style
+                    }
+                }
+            })
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedSidebarEntry, _window, cx| {
+                    this.reorder_entry(dragged.id, id, DropPosition::After, cx);
+                }),
+            );
+
+        div()
+            .id(SharedString::from(format!(
+                "draggable-sidebar-entry-{id:?}"
+            )))
+            .relative()
+            .w_full()
+            .cursor_grab()
+            .on_drag(
+                DraggedSidebarEntry {
+                    id,
+                    project_group_key,
+                    title,
+                },
+                |dragged, _position, _window, cx| {
+                    cx.new(|_| DraggedSidebarEntryView {
+                        title: dragged.title.clone(),
+                    })
+                },
+            )
+            .child(entry)
+            .child(
+                v_flex()
+                    .absolute()
+                    .inset_0()
+                    .w_full()
+                    .h_full()
+                    .child(top_drop_zone)
+                    .child(bottom_drop_zone),
+            )
+            .into_any_element()
     }
 
     fn render_remote_project_icon(
@@ -5704,29 +6041,38 @@ impl Sidebar {
         metadata.interacted_at.unwrap_or(metadata.updated_at)
     }
 
-    fn push_entries_by_display_time(
+    fn push_entries_in_sidebar_order(
         entries: &mut Vec<ListEntry>,
         terminals: Vec<TerminalEntry>,
         threads: Vec<Arc<ThreadEntry>>,
+        entry_ranks: &HashMap<SidebarEntryId, usize>,
         current_session_ids: &mut HashSet<acp::SessionId>,
         current_thread_ids: &mut HashSet<agent_ui::ThreadId>,
     ) {
-        fn display_time(entry: &ListEntry) -> DateTime<Utc> {
-            match entry {
-                ListEntry::Thread(thread) if thread.draft == Some(DraftKind::Empty) => {
-                    DateTime::<Utc>::MAX_UTC
-                }
-                ListEntry::Thread(thread) => Sidebar::thread_display_time(&thread.metadata),
-                ListEntry::Terminal(terminal) => terminal.metadata.created_at,
-                ListEntry::ProjectHeader { .. } => unreachable!(),
-            }
-        }
-
-        let row_entries = terminals
+        let mut row_entries: Vec<_> = terminals
             .into_iter()
             .map(ListEntry::Terminal)
             .chain(threads.into_iter().map(ListEntry::Thread))
-            .sorted_by_key(|right| std::cmp::Reverse(display_time(right)));
+            .collect();
+        row_entries.sort_by(|left, right| {
+            let (Some(left_id), Some(right_id), Some(left_time), Some(right_time)) = (
+                left.sidebar_entry_id(),
+                right.sidebar_entry_id(),
+                left.creation_time(),
+                right.creation_time(),
+            ) else {
+                return Ordering::Equal;
+            };
+
+            match (entry_ranks.get(&left_id), entry_ranks.get(&right_id)) {
+                (None, None) => right_time
+                    .cmp(&left_time)
+                    .then_with(|| left_id.cmp(&right_id)),
+                (Some(left_rank), Some(right_rank)) => left_rank.cmp(right_rank),
+                (None, Some(_)) => Ordering::Less,
+                (Some(_), None) => Ordering::Greater,
+            }
+        });
 
         for entry in row_entries {
             if let ListEntry::Thread(thread) = &entry {
@@ -7725,6 +8071,7 @@ impl WorkspaceSidebar for Sidebar {
                 SidebarView::ThreadList => SerializedSidebarView::ThreadList,
                 SidebarView::Archive(_) => SerializedSidebarView::History,
             },
+            entry_order: self.entry_order.clone(),
         };
         serde_json::to_string(&serialized).ok()
     }
@@ -7739,11 +8086,23 @@ impl WorkspaceSidebar for Sidebar {
             if let Some(width) = serialized.width {
                 self.width = px(width).clamp(MIN_WIDTH, MAX_WIDTH);
             }
+            if !self.has_persisted_entry_order {
+                let mut seen_entry_ids = HashSet::new();
+                self.entry_order = serialized
+                    .entry_order
+                    .into_iter()
+                    .filter(|id| seen_entry_ids.insert(*id))
+                    .collect();
+                self.has_persisted_entry_order = true;
+                self.persist_entry_order(cx);
+            }
+
             if serialized.active_view == SerializedSidebarView::History {
                 cx.defer_in(window, |this, window, cx| {
                     this.show_archive(window, cx);
                 });
             }
+            self.schedule_update_entries(false, cx);
         }
         cx.notify();
     }
