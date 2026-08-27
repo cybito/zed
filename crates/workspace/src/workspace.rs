@@ -9100,7 +9100,7 @@ impl Render for CenterPaneButton {
             "Show Editor".into()
         };
 
-        IconButton::new("toggle-center-pane", IconName::Split)
+        IconButton::new("toggle-center-pane", IconName::Code)
             .icon_size(IconSize::Small)
             .toggle_state(visible)
             .tab_index(0isize)
