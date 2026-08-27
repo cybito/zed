@@ -5222,7 +5222,7 @@ impl Workspace {
         activate_pane: bool,
         focus_item: bool,
         window: &mut Window,
-        cx: &mut App,
+        cx: &mut Context<Self>,
     ) -> bool {
         let result = self.panes.iter().find_map(|pane| {
             pane.read(cx)
@@ -5230,6 +5230,7 @@ impl Workspace {
                 .map(|ix| (pane.clone(), ix))
         });
         if let Some((pane, ix)) = result {
+            self.show_center_pane(window, cx);
             pane.update(cx, |pane, cx| {
                 pane.activate_item(ix, activate_pane, focus_item, window, cx)
             });
@@ -5749,6 +5750,7 @@ impl Workspace {
         let mut serialize_workspace = true;
         match event {
             pane::Event::AddItem { item } => {
+                self.show_center_pane(window, cx);
                 item.added_to_pane(self, pane.clone(), window, cx);
                 cx.emit(Event::ItemAdded {
                     item: item.boxed_clone(),
