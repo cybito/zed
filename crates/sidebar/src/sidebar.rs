@@ -2623,7 +2623,7 @@ impl Sidebar {
             IconName::ChevronDown
         };
 
-        let key_for_toggle = key.clone();
+        let key_for_collapse = key.clone();
         let key_for_focus = key.clone();
 
         // The fade gradient renders as a visible patch on transparent windows,
@@ -2737,13 +2737,20 @@ impl Sidebar {
                     })
                     .when(!has_filter, |this| {
                         this.child(
-                            div()
-                                .when(!is_focused, |this| this.visible_on_hover(&group_name))
-                                .child(
-                                    Icon::new(disclosure_icon)
-                                        .size(IconSize::Small)
-                                        .color(Color::Muted),
-                                ),
+                            IconButton::new(
+                                SharedString::from(format!(
+                                    "{id_prefix}project-header-collapse-{ix}"
+                                )),
+                                disclosure_icon,
+                            )
+                            .icon_size(IconSize::Small)
+                            .when(!is_focused, |this| this.visible_on_hover(&group_name))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_collapse(&key_for_collapse, window, cx);
+                                },
+                            )),
                         )
                     }),
             )
@@ -2778,15 +2785,9 @@ impl Sidebar {
                     menu_handle.toggle(window, cx);
                 }
             })
-            .on_click(
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    if event.modifiers().secondary() {
-                        this.activate_or_open_workspace_for_group(&key_for_focus, window, cx);
-                    } else if !this.has_filter_query(cx) {
-                        this.toggle_collapse(&key_for_toggle, window, cx);
-                    }
-                }),
-            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.activate_or_open_workspace_for_group(&key_for_focus, window, cx);
+            }))
             .block_mouse_except_scroll();
 
         if !is_collapsed && !has_threads {
@@ -8094,7 +8095,7 @@ impl WorkspaceSidebar for Sidebar {
                     .filter(|id| seen_entry_ids.insert(*id))
                     .collect();
                 self.has_persisted_entry_order = true;
-                self.persist_entry_order(cx);
+                cx.defer_in(window, |this, _, cx| this.persist_entry_order(cx));
             }
 
             if serialized.active_view == SerializedSidebarView::History {
