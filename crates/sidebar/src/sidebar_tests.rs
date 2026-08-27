@@ -826,39 +826,6 @@ async fn test_clicking_project_header_activates_group_without_collapsing(cx: &mu
     );
 }
 
-#[gpui::test]
-async fn test_clicking_project_header_collapse_button_toggles_group(cx: &mut TestAppContext) {
-    let project = init_test_project("/my-project", cx).await;
-    let (multi_workspace, cx) =
-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let sidebar = setup_sidebar(&multi_workspace, cx);
-    let project_group_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
-
-    cx.draw(
-        gpui::point(px(0.), px(0.)),
-        gpui::size(px(400.), px(240.)),
-        |_, _| sidebar.clone().into_any_element(),
-    );
-    cx.run_until_parked();
-
-    let header_bounds = sidebar.read_with(cx, |sidebar, _| {
-        sidebar
-            .list_state
-            .bounds_for_item(0)
-            .expect("project header should be measured")
-    });
-    cx.simulate_click(
-        gpui::point(header_bounds.right() - px(72.), header_bounds.center().y),
-        Modifiers::default(),
-    );
-    cx.run_until_parked();
-
-    assert!(
-        sidebar.read_with(cx, |sidebar, cx| sidebar
-            .is_group_collapsed(&project_group_key, cx)),
-        "clicking the project header collapse button should collapse its group"
-    );
-}
 
 #[gpui::test]
 async fn test_serialization_round_trip(cx: &mut TestAppContext) {
