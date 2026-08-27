@@ -770,6 +770,97 @@ async fn test_collapse_changes_entry_shape(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_clicking_project_header_activates_group_without_collapsing(cx: &mut TestAppContext) {
+    let (fs, project_a) = init_multi_project_test(&["/project-a", "/project-b"], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let workspace_a = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let workspace_b = add_test_project("/project-b", &fs, &multi_workspace, cx).await;
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.activate(workspace_b.clone(), None, window, cx);
+    });
+    cx.run_until_parked();
+
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(400.), px(240.)),
+        |_, _| sidebar.clone().into_any_element(),
+    );
+    cx.run_until_parked();
+
+    let (header_ix, header_bounds) = sidebar.read_with(cx, |sidebar, _| {
+        let header_ix = sidebar
+            .contents
+            .entries
+            .iter()
+            .position(|entry| matches!(entry, ListEntry::ProjectHeader { label, .. } if label == "project-a"))
+            .expect("project A header should be visible");
+        let header_bounds = sidebar
+            .list_state
+            .bounds_for_item(header_ix)
+            .expect("project A header should be measured");
+        (header_ix, header_bounds)
+    });
+
+    cx.simulate_click(
+        gpui::point(header_bounds.left() + px(16.), header_bounds.center().y),
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+
+    assert_eq!(
+        multi_workspace.read_with(cx, |mw, _| mw.workspace().clone()),
+        workspace_a,
+        "clicking a project header should activate its workspace"
+    );
+    assert!(
+        !sidebar.read_with(cx, |sidebar, cx| {
+            let ListEntry::ProjectHeader { key, .. } = &sidebar.contents.entries[header_ix] else {
+                unreachable!("entry used to find project header must still be a header");
+            };
+            sidebar.is_group_collapsed(key, cx)
+        }),
+        "clicking a project header should not collapse its group"
+    );
+}
+
+#[gpui::test]
+async fn test_clicking_project_header_collapse_button_toggles_group(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let project_group_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(400.), px(240.)),
+        |_, _| sidebar.clone().into_any_element(),
+    );
+    cx.run_until_parked();
+
+    let header_bounds = sidebar.read_with(cx, |sidebar, _| {
+        sidebar
+            .list_state
+            .bounds_for_item(0)
+            .expect("project header should be measured")
+    });
+    cx.simulate_click(
+        gpui::point(header_bounds.right() - px(72.), header_bounds.center().y),
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+
+    assert!(
+        sidebar.read_with(cx, |sidebar, cx| sidebar
+            .is_group_collapsed(&project_group_key, cx)),
+        "clicking the project header collapse button should collapse its group"
+    );
+}
+
+#[gpui::test]
 async fn test_serialization_round_trip(cx: &mut TestAppContext) {
     let project = init_test_project("/my-project", cx).await;
     let (multi_workspace, cx) =
@@ -1196,6 +1287,30 @@ async fn test_restore_serialized_archive_view_does_not_panic(cx: &mut TestAppCon
             "expected sidebar view to be Archive after restore, got ThreadList"
         );
     });
+}
+
+#[gpui::test]
+async fn test_restore_serialized_state_defers_entry_order_persistence(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    let serialized = serde_json::to_string(&SerializedSidebar {
+        width: None,
+        active_view: SerializedSidebarView::ThreadList,
+        entry_order: Vec::new(),
+    })
+    .expect("serialization should succeed");
+
+    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+        multi_workspace
+            .sidebar()
+            .expect("sidebar should be registered")
+            .restore_serialized_state(&serialized, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert!(sidebar.read_with(cx, |sidebar, _| sidebar.has_persisted_entry_order));
 }
 
 #[gpui::test]
