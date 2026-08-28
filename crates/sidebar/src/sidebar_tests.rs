@@ -826,7 +826,6 @@ async fn test_clicking_project_header_activates_group_without_collapsing(cx: &mu
     );
 }
 
-
 #[gpui::test]
 async fn test_serialization_round_trip(cx: &mut TestAppContext) {
     let project = init_test_project("/my-project", cx).await;

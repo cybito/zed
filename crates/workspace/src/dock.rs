@@ -466,7 +466,16 @@ impl Dock {
         .detach();
 
         cx.observe_in(&dock, window, move |workspace, dock, window, cx| {
-            if dock.read(cx).is_open()
+            let dock_is_open = dock.read(cx).is_open();
+            if position == DockPosition::Bottom {
+                if dock_is_open {
+                    workspace.show_center_pane(window, cx);
+                } else {
+                    workspace.hide_center_pane_if_empty(window, cx);
+                }
+            }
+
+            if dock_is_open
                 && let Some(panel) = dock.read(cx).active_panel()
                 && panel.is_zoomed(window, cx)
             {

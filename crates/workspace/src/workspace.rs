@@ -2286,13 +2286,10 @@ impl Workspace {
     }
 
     fn toggle_bottom_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.bottom_dock.read(cx).is_open() {
-            self.show_center_pane(window, cx);
-        }
         self.toggle_dock(DockPosition::Bottom, window, cx);
     }
     fn hide_center_pane_if_empty(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.items(cx).next().is_none() {
+        if self.items(cx).next().is_none() && !self.bottom_dock.read(cx).is_open() {
             self.set_center_pane_visible(false, window, cx);
         }
     }
@@ -15493,6 +15490,17 @@ mod tests {
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
         let (panel_1, panel_2) = workspace.update_in(cx, |workspace, window, cx| {
+            let center_pane = workspace.active_pane().clone();
+            let center_item = cx.new(TestItem::new);
+            workspace.add_item(
+                center_pane,
+                Box::new(center_item),
+                None,
+                true,
+                true,
+                window,
+                cx,
+            );
             let panel_1 = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
             workspace.add_panel(panel_1.clone(), window, cx);
             workspace.toggle_dock(DockPosition::Left, window, cx);
@@ -18117,6 +18125,9 @@ mod tests {
             let pane = workspace.active_pane().clone();
             let item = cx.new(TestItem::new);
             workspace.add_item(pane.clone(), Box::new(item), None, true, true, window, cx);
+            let bottom_panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 100, cx));
+            workspace.add_panel(bottom_panel, window, cx);
+            workspace.open_panel::<TestPanel>(window, cx);
             pane
         });
         cx.run_until_parked();
@@ -18141,6 +18152,15 @@ mod tests {
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.items(cx).next().is_none());
+            assert!(workspace.bottom_dock().read(cx).is_open());
+            assert!(workspace.is_center_pane_visible(cx));
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_bottom_dock(window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
             assert!(!workspace.is_center_pane_visible(cx));
         });
         assert!(cx.debug_bounds("editor-region").is_none());
@@ -18193,17 +18213,16 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.toggle_bottom_dock(window, cx);
         });
+        cx.run_until_parked();
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.bottom_dock().read(cx).is_open());
             assert!(workspace.is_center_pane_visible(cx));
         });
 
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.set_center_pane_visible(false, window, cx);
-        });
-        workspace.update_in(cx, |workspace, window, cx| {
             workspace.toggle_bottom_dock(window, cx);
         });
+        cx.run_until_parked();
         workspace.read_with(cx, |workspace, cx| {
             assert!(!workspace.bottom_dock().read(cx).is_open());
             assert!(!workspace.is_center_pane_visible(cx));

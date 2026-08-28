@@ -218,12 +218,11 @@ async fn test_opening_or_activating_file_reveals_center_pane(cx: &mut gpui::Test
     });
     ensure_single_file_is_opened(&workspace, "test/first.rs", cx);
 
-    let active_item = workspace
-        .read_with(cx, |workspace, cx| {
-            workspace
-                .active_item(cx)
-                .expect("opened file should be the active item")
-        });
+    let active_item = workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .active_item(cx)
+            .expect("opened file should be the active item")
+    });
     workspace.update_in(cx, |workspace, window, cx| {
         workspace.restore_center_pane_visibility(Some(false), cx);
         assert!(workspace.activate_item(active_item.as_ref(), true, true, window, cx));
