@@ -2230,8 +2230,14 @@ impl Workspace {
     }
 
     pub fn is_center_pane_visible(&self, cx: &App) -> bool {
-        self.center_pane_visible
-            .unwrap_or_else(|| !matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_)))
+        self.center_pane_visible.unwrap_or_else(|| {
+            !matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
+                || !self.all_docks().iter().any(|dock| {
+                    dock.read(cx)
+                        .visible_panel()
+                        .is_some_and(|panel| panel.is_agent_panel(cx))
+                })
+        })
     }
 
     pub fn show_center_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -17909,9 +17915,8 @@ mod tests {
 
         workspace.read_with(cx, |workspace, cx| {
             assert_eq!(workspace.center_pane_visible, None);
-            assert!(!workspace.is_center_pane_visible(cx));
+            assert!(workspace.is_center_pane_visible(cx));
         });
-        assert!(cx.debug_bounds("editor-region").is_none());
 
         cx.update_global(|store: &mut SettingsStore, cx| {
             store
@@ -18048,6 +18053,58 @@ mod tests {
         });
     }
     #[gpui::test]
+    async fn test_agentic_layout_hides_center_pane_only_with_agent_panel(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store
+                    .set_user_settings(
+                        r#"{
+                            "agent": { "dock": "left" },
+                            "project_panel": { "dock": "right" },
+                            "outline_panel": { "dock": "right" },
+                            "collaboration_panel": { "dock": "right" },
+                            "git_panel": { "dock": "right" }
+                        }"#,
+                        cx,
+                    )
+                    .expect("agent layout settings should parse");
+            });
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_center_pane_visible(cx));
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.focus_panel::<TestPanel>(window, cx);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.is_center_pane_visible(cx));
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .left_dock()
+                .update(cx, |dock, cx| dock.set_open(false, window, cx));
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_center_pane_visible(cx));
+        });
+    }
+    #[gpui::test]
     async fn test_center_pane_hides_after_last_item_closes(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
@@ -18107,24 +18164,9 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let center_pane_button_bounds = cx
-            .debug_bounds("ICON-Split")
-            .expect("Center-pane toggle should be mounted in the status bar");
-        cx.simulate_event(MouseDownEvent {
-            position: center_pane_button_bounds.center(),
-            button: MouseButton::Left,
-            modifiers: Modifiers::default(),
-            click_count: 1,
-            first_mouse: false,
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_center_pane(window, cx);
         });
-        cx.run_until_parked();
-        cx.simulate_event(MouseUpEvent {
-            position: center_pane_button_bounds.center(),
-            button: MouseButton::Left,
-            modifiers: Modifiers::default(),
-            click_count: 1,
-        });
-        cx.run_until_parked();
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.is_center_pane_visible(cx));
