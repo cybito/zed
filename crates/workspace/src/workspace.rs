@@ -2232,6 +2232,7 @@ impl Workspace {
     pub fn is_center_pane_visible(&self, cx: &App) -> bool {
         self.center_pane_visible.unwrap_or_else(|| {
             !matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
+                || self.items(cx).next().is_some()
                 || !self.all_docks().iter().any(|dock| {
                     dock.read(cx)
                         .visible_panel()
@@ -2290,7 +2291,20 @@ impl Workspace {
     }
     fn hide_center_pane_if_empty(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.items(cx).next().is_none() && !self.bottom_dock.read(cx).is_open() {
-            self.set_center_pane_visible(false, window, cx);
+            if matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
+                && self
+                    .all_docks()
+                    .iter()
+                    .any(|dock| dock.read(cx).has_agent_panel(cx))
+            {
+                let was_visible = self.is_center_pane_visible(cx);
+                self.center_pane_visible = None;
+                if was_visible != self.is_center_pane_visible(cx) {
+                    cx.notify();
+                }
+            } else {
+                self.set_center_pane_visible(false, window, cx);
+            }
         }
     }
 
@@ -18089,11 +18103,11 @@ mod tests {
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.is_center_pane_visible(cx));
         });
-
-        workspace.update_in(cx, |workspace, window, cx| {
+        let _panel = workspace.update_in(cx, |workspace, window, cx| {
             let panel = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 100, cx));
-            workspace.add_panel(panel, window, cx);
+            workspace.add_panel(panel.clone(), window, cx);
             workspace.focus_panel::<TestPanel>(window, cx);
+            panel
         });
         cx.run_until_parked();
 
@@ -18108,6 +18122,47 @@ mod tests {
         });
         cx.run_until_parked();
 
+        let pane = workspace.update_in(cx, |workspace, window, cx| {
+            let pane = workspace.active_pane().clone();
+            let item = cx.new(TestItem::new);
+            workspace.add_item(pane.clone(), Box::new(item), None, true, true, window, cx);
+            pane
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .left_dock()
+                .update(cx, |dock, cx| dock.set_open(true, window, cx));
+            workspace.focus_panel::<TestPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_center_pane_visible(cx));
+        });
+
+        let close_task = pane.update_in(cx, |pane, window, cx| {
+            pane.close_active_item(
+                &pane::CloseActiveItem {
+                    save_intent: Some(SaveIntent::Close),
+                    close_pinned: false,
+                },
+                window,
+                cx,
+            )
+        });
+        close_task
+            .await
+            .expect("closing the final center item should succeed");
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.is_center_pane_visible(cx));
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .left_dock()
+                .update(cx, |dock, cx| dock.set_open(false, window, cx));
+        });
+        cx.run_until_parked();
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.is_center_pane_visible(cx));
         });

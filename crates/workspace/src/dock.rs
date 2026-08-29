@@ -467,13 +467,10 @@ impl Dock {
 
         cx.observe_in(&dock, window, move |workspace, dock, window, cx| {
             let dock_is_open = dock.read(cx).is_open();
-            if position == DockPosition::Bottom {
-                if dock_is_open {
-                    workspace.show_center_pane(window, cx);
-                } else {
-                    workspace.hide_center_pane_if_empty(window, cx);
-                }
+            if position == DockPosition::Bottom && dock_is_open {
+                workspace.show_center_pane(window, cx);
             }
+            workspace.hide_center_pane_if_empty(window, cx);
 
             if dock_is_open
                 && let Some(panel) = dock.read(cx).active_panel()
