@@ -466,13 +466,8 @@ impl Dock {
         .detach();
 
         cx.observe_in(&dock, window, move |workspace, dock, window, cx| {
-            let dock_is_open = dock.read(cx).is_open();
-            if position == DockPosition::Bottom && dock_is_open {
-                workspace.show_center_pane(window, cx);
-            }
             workspace.hide_center_pane_if_empty(window, cx);
-
-            if dock_is_open
+            if dock.read(cx).is_open()
                 && let Some(panel) = dock.read(cx).active_panel()
                 && panel.is_zoomed(window, cx)
             {
@@ -1533,7 +1528,6 @@ pub mod test {
         pub activation_focus_handle: Option<FocusHandle>,
         pub default_size: Pixels,
         pub flexible: bool,
-        pub is_agent: bool,
         pub activation_priority: u32,
     }
     actions!(test_only, [ToggleTestPanel]);
@@ -1550,15 +1544,7 @@ pub mod test {
                 activation_focus_handle: None,
                 default_size: px(300.),
                 flexible: false,
-                is_agent: false,
                 activation_priority,
-            }
-        }
-
-        pub fn new_agent(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
-            Self {
-                is_agent: true,
-                ..Self::new(position, activation_priority, cx)
             }
         }
 
@@ -1678,10 +1664,6 @@ pub mod test {
 
         fn activation_priority(&self) -> u32 {
             self.activation_priority
-        }
-
-        fn is_agent_panel(&self) -> bool {
-            self.is_agent
         }
     }
 

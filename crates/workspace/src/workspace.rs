@@ -2230,15 +2230,8 @@ impl Workspace {
     }
 
     pub fn is_center_pane_visible(&self, cx: &App) -> bool {
-        self.center_pane_visible.unwrap_or_else(|| {
-            !matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
-                || self.items(cx).next().is_some()
-                || !self.all_docks().iter().any(|dock| {
-                    dock.read(cx)
-                        .visible_panel()
-                        .is_some_and(|panel| panel.is_agent_panel(cx))
-                })
-        })
+        self.center_pane_visible
+            .unwrap_or_else(|| !matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_)))
     }
 
     pub fn show_center_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2266,17 +2259,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let was_visible = self.is_center_pane_visible(cx);
-        let center_had_focus = !visible
-            && self
+        let hidden_area_had_focus = !visible
+            && (self
                 .panes
                 .iter()
-                .any(|pane| pane.read(cx).has_focus(window, cx));
+                .any(|pane| pane.read(cx).has_focus(window, cx))
+                || self
+                    .bottom_dock
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx));
         self.center_pane_visible = Some(visible);
 
         if was_visible != visible {
             cx.notify();
             self.serialize_workspace(window, cx);
-            if center_had_focus {
+            if hidden_area_had_focus {
                 self.move_part_focus(true, window, cx);
             }
         }
@@ -2287,24 +2285,14 @@ impl Workspace {
     }
 
     fn toggle_bottom_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.bottom_dock.read(cx).is_open() {
+            self.show_center_pane(window, cx);
+        }
         self.toggle_dock(DockPosition::Bottom, window, cx);
     }
     fn hide_center_pane_if_empty(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.items(cx).next().is_none() && !self.bottom_dock.read(cx).is_open() {
-            if matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_))
-                && self
-                    .all_docks()
-                    .iter()
-                    .any(|dock| dock.read(cx).has_agent_panel(cx))
-            {
-                let was_visible = self.is_center_pane_visible(cx);
-                self.center_pane_visible = None;
-                if was_visible != self.is_center_pane_visible(cx) {
-                    cx.notify();
-                }
-            } else {
-                self.set_center_pane_visible(false, window, cx);
-            }
+            self.set_center_pane_visible(false, window, cx);
         }
     }
 
@@ -9193,8 +9181,7 @@ impl Render for Workspace {
             .collect::<Vec<_>>();
         let bottom_dock_layout = WorkspaceSettings::get_global(cx).bottom_dock_layout;
         let center_pane_visible = self.is_center_pane_visible(cx);
-        let bottom_dock_open = self.bottom_dock.read(cx).is_open();
-        let center_or_bottom_dock_visible = center_pane_visible || bottom_dock_open;
+        let center_or_bottom_dock_visible = center_pane_visible;
 
         let pane_render_context = PaneRenderContext {
             follower_states: &self.follower_states,
@@ -9431,7 +9418,9 @@ impl Render for Workspace {
                                                 })
                                                 .children(right_dock),
                                         )
-                                        .child(div().w_full().children(bottom_dock)),
+                                        .when(center_pane_visible, |this| {
+                                            this.child(div().w_full().children(bottom_dock))
+                                        }),
 
                                     BottomDockLayout::LeftAligned => div()
                                         .flex()
@@ -9490,7 +9479,9 @@ impl Render for Workspace {
                                                             )
                                                         }),
                                                 )
-                                                .child(div().w_full().children(bottom_dock)),
+                                                .when(center_pane_visible, |this| {
+                                                    this.child(div().w_full().children(bottom_dock))
+                                                }),
                                         )
                                         .children(right_dock),
 
@@ -9555,7 +9546,9 @@ impl Render for Workspace {
                                                         })
                                                         .children(right_dock),
                                                 )
-                                                .child(div().w_full().children(bottom_dock)),
+                                                .when(center_pane_visible, |this| {
+                                                    this.child(div().w_full().children(bottom_dock))
+                                                }),
                                         ),
 
                                     BottomDockLayout::Contained => div()
@@ -9597,7 +9590,9 @@ impl Render for Workspace {
                                                                 ),
                                                         )
                                                     })
-                                                    .children(bottom_dock),
+                                                    .when(center_pane_visible, |this| {
+                                                        this.children(bottom_dock)
+                                                    }),
                                             )
                                         })
                                         .children(right_dock),
@@ -15504,17 +15499,6 @@ mod tests {
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
         let (panel_1, panel_2) = workspace.update_in(cx, |workspace, window, cx| {
-            let center_pane = workspace.active_pane().clone();
-            let center_item = cx.new(TestItem::new);
-            workspace.add_item(
-                center_pane,
-                Box::new(center_item),
-                None,
-                true,
-                true,
-                window,
-                cx,
-            );
             let panel_1 = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
             workspace.add_panel(panel_1.clone(), window, cx);
             workspace.toggle_dock(DockPosition::Left, window, cx);
@@ -17937,8 +17921,9 @@ mod tests {
 
         workspace.read_with(cx, |workspace, cx| {
             assert_eq!(workspace.center_pane_visible, None);
-            assert!(workspace.is_center_pane_visible(cx));
+            assert!(!workspace.is_center_pane_visible(cx));
         });
+        assert!(cx.debug_bounds("editor-region").is_none());
 
         cx.update_global(|store: &mut SettingsStore, cx| {
             store
@@ -18075,99 +18060,6 @@ mod tests {
         });
     }
     #[gpui::test]
-    async fn test_agentic_layout_hides_center_pane_only_with_agent_panel(cx: &mut TestAppContext) {
-        init_test(cx);
-        cx.update(|cx| {
-            SettingsStore::update_global(cx, |store, cx| {
-                store
-                    .set_user_settings(
-                        r#"{
-                            "agent": { "dock": "left" },
-                            "project_panel": { "dock": "right" },
-                            "outline_panel": { "dock": "right" },
-                            "collaboration_panel": { "dock": "right" },
-                            "git_panel": { "dock": "right" }
-                        }"#,
-                        cx,
-                    )
-                    .expect("agent layout settings should parse");
-            });
-        });
-
-        let fs = FakeFs::new(cx.executor());
-        let project = Project::test(fs, [], cx).await;
-        let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
-        cx.run_until_parked();
-
-        workspace.read_with(cx, |workspace, cx| {
-            assert!(workspace.is_center_pane_visible(cx));
-        });
-        let _panel = workspace.update_in(cx, |workspace, window, cx| {
-            let panel = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 100, cx));
-            workspace.add_panel(panel.clone(), window, cx);
-            workspace.focus_panel::<TestPanel>(window, cx);
-            panel
-        });
-        cx.run_until_parked();
-
-        workspace.read_with(cx, |workspace, cx| {
-            assert!(!workspace.is_center_pane_visible(cx));
-        });
-
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace
-                .left_dock()
-                .update(cx, |dock, cx| dock.set_open(false, window, cx));
-        });
-        cx.run_until_parked();
-
-        let pane = workspace.update_in(cx, |workspace, window, cx| {
-            let pane = workspace.active_pane().clone();
-            let item = cx.new(TestItem::new);
-            workspace.add_item(pane.clone(), Box::new(item), None, true, true, window, cx);
-            pane
-        });
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace
-                .left_dock()
-                .update(cx, |dock, cx| dock.set_open(true, window, cx));
-            workspace.focus_panel::<TestPanel>(window, cx);
-        });
-        cx.run_until_parked();
-        workspace.read_with(cx, |workspace, cx| {
-            assert!(workspace.is_center_pane_visible(cx));
-        });
-
-        let close_task = pane.update_in(cx, |pane, window, cx| {
-            pane.close_active_item(
-                &pane::CloseActiveItem {
-                    save_intent: Some(SaveIntent::Close),
-                    close_pinned: false,
-                },
-                window,
-                cx,
-            )
-        });
-        close_task
-            .await
-            .expect("closing the final center item should succeed");
-        cx.run_until_parked();
-        workspace.read_with(cx, |workspace, cx| {
-            assert!(!workspace.is_center_pane_visible(cx));
-        });
-
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace
-                .left_dock()
-                .update(cx, |dock, cx| dock.set_open(false, window, cx));
-        });
-        cx.run_until_parked();
-        workspace.read_with(cx, |workspace, cx| {
-            assert!(workspace.is_center_pane_visible(cx));
-        });
-    }
-    #[gpui::test]
     async fn test_center_pane_hides_after_last_item_closes(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
@@ -18180,9 +18072,6 @@ mod tests {
             let pane = workspace.active_pane().clone();
             let item = cx.new(TestItem::new);
             workspace.add_item(pane.clone(), Box::new(item), None, true, true, window, cx);
-            let bottom_panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 100, cx));
-            workspace.add_panel(bottom_panel, window, cx);
-            workspace.open_panel::<TestPanel>(window, cx);
             pane
         });
         cx.run_until_parked();
@@ -18207,15 +18096,6 @@ mod tests {
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.items(cx).next().is_none());
-            assert!(workspace.bottom_dock().read(cx).is_open());
-            assert!(workspace.is_center_pane_visible(cx));
-        });
-
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.toggle_bottom_dock(window, cx);
-        });
-        cx.run_until_parked();
-        workspace.read_with(cx, |workspace, cx| {
             assert!(!workspace.is_center_pane_visible(cx));
         });
         assert!(cx.debug_bounds("editor-region").is_none());
@@ -18239,9 +18119,24 @@ mod tests {
         });
         cx.run_until_parked();
 
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.toggle_center_pane(window, cx);
+        let center_pane_button_bounds = cx
+            .debug_bounds("ICON-Code")
+            .expect("Center-pane toggle should be mounted in the status bar");
+        cx.simulate_event(MouseDownEvent {
+            position: center_pane_button_bounds.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
         });
+        cx.run_until_parked();
+        cx.simulate_event(MouseUpEvent {
+            position: center_pane_button_bounds.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
 
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.is_center_pane_visible(cx));
@@ -18268,16 +18163,17 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.toggle_bottom_dock(window, cx);
         });
-        cx.run_until_parked();
         workspace.read_with(cx, |workspace, cx| {
             assert!(workspace.bottom_dock().read(cx).is_open());
             assert!(workspace.is_center_pane_visible(cx));
         });
 
         workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_center_pane_visible(false, window, cx);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
             workspace.toggle_bottom_dock(window, cx);
         });
-        cx.run_until_parked();
         workspace.read_with(cx, |workspace, cx| {
             assert!(!workspace.bottom_dock().read(cx).is_open());
             assert!(!workspace.is_center_pane_visible(cx));
