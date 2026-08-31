@@ -158,6 +158,14 @@ impl SquirrelBridge {
             Ok(response) => response,
             Err(error) => return self.fail(error),
         };
+        if matches!(
+            response.status.as_str(),
+            "no_active_session" | "session_unavailable"
+        ) {
+            self.lease = None;
+            self.lease_owner = None;
+            return PrepareResult::Unavailable;
+        }
         if response.status == "stale_session" {
             return if retry_stale_session {
                 self.acquire_command_with_retry(false)
@@ -450,6 +458,34 @@ mod tests {
         assert!(bridge.lease_owner.is_none());
         assert_eq!(bridge.acquire_for_owner(1), PrepareResult::Ready);
         assert!(bridge.lease.is_some());
+        server.join().expect("join test bridge");
+    }
+
+    #[test]
+    fn session_disappearing_during_acquisition_is_unavailable() {
+        let (path, server) = test_server(vec![
+            json!({
+                "version": 1,
+                "requestId": "1",
+                "status": "ok",
+                "sessionToken": "session",
+                "sessionGeneration": 10
+            }),
+            json!({
+                "version": 1,
+                "requestId": "2",
+                "status": "no_active_session"
+            }),
+        ]);
+        let mut bridge = SquirrelBridge {
+            enabled: true,
+            ..Default::default()
+        };
+        bridge.stream = Some(UnixStream::connect(path).expect("connect test bridge"));
+
+        assert_eq!(bridge.acquire_for_owner(1), PrepareResult::Unavailable);
+        assert!(bridge.lease.is_none());
+        assert!(bridge.lease_owner.is_none());
         server.join().expect("join test bridge");
     }
     #[test]
