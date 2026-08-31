@@ -15,6 +15,8 @@ mod normal;
 mod object;
 mod replace;
 mod rewrap;
+#[cfg(target_os = "macos")]
+mod squirrel_bridge;
 mod state;
 mod surrounds;
 mod visual;
@@ -66,6 +68,10 @@ enum HelixJumpNavigationOverlay {}
 
 pub(crate) const HELIX_JUMP_OVERLAY_KEY: NavigationOverlayKey =
     NavigationOverlayKey::unique::<HelixJumpNavigationOverlay>();
+#[cfg(target_os = "macos")]
+fn is_squirrel_command_mode(mode: Mode) -> bool {
+    !matches!(mode, Mode::Insert | Mode::Replace)
+}
 
 /// Number is used to manage vim's count. Pushing a digit
 /// multiplies the current value by 10 and adds the digit.
@@ -539,6 +545,10 @@ pub(crate) struct Vim {
 
     last_command: Option<String>,
     running_command: Option<Task<()>>,
+    #[cfg(target_os = "macos")]
+    squirrel_bridge_transition_pending: bool,
+    #[cfg(target_os = "macos")]
+    squirrel_bridge_prepared_transition: Option<(bool, bool)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -606,6 +616,10 @@ impl Vim {
 
             last_command: None,
             running_command: None,
+            #[cfg(target_os = "macos")]
+            squirrel_bridge_transition_pending: false,
+            #[cfg(target_os = "macos")]
+            squirrel_bridge_prepared_transition: None,
 
             editor: editor.downgrade(),
             _subscriptions: vec![
@@ -1058,6 +1072,109 @@ impl Vim {
     pub fn workspace(&self, window: &Window, cx: &App) -> Option<Entity<Workspace>> {
         Workspace::for_window(window, cx)
     }
+    #[cfg(target_os = "macos")]
+    fn prepare_squirrel_transition(
+        &mut self,
+        mode: Mode,
+        leave_selections: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let from_command_mode = is_squirrel_command_mode(self.mode);
+        let to_command_mode = is_squirrel_command_mode(mode);
+        if self.squirrel_bridge_prepared_transition == Some((from_command_mode, to_command_mode)) {
+            self.squirrel_bridge_prepared_transition = None;
+            return false;
+        }
+
+        let enabled = VimSettings::get_global(cx).squirrel_vim_mode_bridge;
+        if !enabled {
+            let owner = cx.entity().entity_id().as_u64();
+            cx.background_spawn(async move { squirrel_bridge::set_mode(false, owner, false) })
+                .detach();
+            return false;
+        }
+        if from_command_mode == to_command_mode {
+            return false;
+        }
+        if self.squirrel_bridge_transition_pending {
+            return true;
+        }
+
+        self.squirrel_bridge_transition_pending = true;
+        let owner = cx.entity().entity_id().as_u64();
+        let task =
+            cx.background_spawn(
+                async move { squirrel_bridge::set_mode(true, owner, to_command_mode) },
+            );
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            if let Err(error) = this.update_in(cx, |this, window, cx| {
+                this.squirrel_bridge_transition_pending = false;
+                match result {
+                    squirrel_bridge::PrepareResult::Ready
+                    | squirrel_bridge::PrepareResult::Unavailable => {
+                        this.squirrel_bridge_prepared_transition =
+                            Some((from_command_mode, to_command_mode));
+                        this.switch_mode(mode, leave_selections, window, cx);
+                    }
+                    squirrel_bridge::PrepareResult::CompositionActive => {}
+                    squirrel_bridge::PrepareResult::Faulted(message) => {
+                        this.report_squirrel_bridge_fault(&message, window, cx);
+                    }
+                }
+            }) {
+                log::error!("failed to finish Squirrel Vim mode transition: {error}");
+            }
+        })
+        .detach();
+        true
+    }
+
+    #[cfg(target_os = "macos")]
+    fn focus_squirrel_bridge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let enabled = VimSettings::get_global(cx).squirrel_vim_mode_bridge;
+        let command_mode = is_squirrel_command_mode(self.mode);
+        if !enabled {
+            return;
+        }
+        if self.squirrel_bridge_transition_pending {
+            return;
+        }
+
+        self.squirrel_bridge_transition_pending = true;
+        let owner = cx.entity().entity_id().as_u64();
+        let task = cx
+            .background_spawn(async move { squirrel_bridge::set_mode(true, owner, command_mode) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            if let Err(error) = this.update_in(cx, |this, window, cx| {
+                this.squirrel_bridge_transition_pending = false;
+                match result {
+                    squirrel_bridge::PrepareResult::Ready
+                    | squirrel_bridge::PrepareResult::Unavailable => {}
+                    squirrel_bridge::PrepareResult::CompositionActive => {
+                        this.switch_mode(Mode::Insert, false, window, cx);
+                    }
+                    squirrel_bridge::PrepareResult::Faulted(message) => {
+                        this.report_squirrel_bridge_fault(&message, window, cx);
+                    }
+                }
+            }) {
+                log::error!("failed to finish Squirrel Vim mode focus: {error}");
+            }
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn report_squirrel_bridge_fault(&self, message: &str, window: &Window, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.workspace(window, cx) {
+            workspace.update(cx, |workspace, cx| {
+                workspace.show_error(format!("Squirrel Vim mode bridge failed: {message}"), cx);
+            });
+        }
+    }
 
     pub fn pane(&self, window: &Window, cx: &Context<Self>) -> Option<Entity<Pane>> {
         let pane = self
@@ -1212,6 +1329,11 @@ impl Vim {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(target_os = "macos")]
+        if self.prepare_squirrel_transition(mode, leave_selections, window, cx) {
+            return;
+        }
+
         if self.temp_mode && mode == Mode::Normal {
             self.temp_mode = false;
             self.switch_mode(Mode::Normal, leave_selections, window, cx);
@@ -1616,10 +1738,32 @@ impl Vim {
                 });
             }
         }
+        #[cfg(target_os = "macos")]
+        self.focus_squirrel_bridge(window, cx);
+
         Vim::globals(cx).focused_vim = Some(cx.entity().downgrade());
     }
 
     fn blurred(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            let owner = cx.entity().entity_id().as_u64();
+            let enabled = VimSettings::get_global(cx).squirrel_vim_mode_bridge;
+            let task = cx
+                .background_spawn(async move { squirrel_bridge::set_mode(enabled, owner, false) });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                if let squirrel_bridge::PrepareResult::Faulted(message) = result
+                    && let Err(error) = this.update_in(cx, |this, window, cx| {
+                        this.report_squirrel_bridge_fault(&message, window, cx);
+                    })
+                {
+                    log::error!("failed to finish Squirrel Vim mode blur: {error}");
+                }
+            })
+            .detach();
+        }
+
         self.stop_recording_immediately(NormalBefore.boxed_clone(), cx);
         self.store_visual_marks(window, cx);
         self.clear_operator(window, cx);
@@ -2335,6 +2479,7 @@ struct VimEditorSettingsState {
 struct VimSettings {
     pub default_mode: Mode,
     pub toggle_relative_line_numbers: bool,
+    pub squirrel_vim_mode_bridge: bool,
     pub use_system_clipboard: settings::UseSystemClipboard,
     pub use_smartcase_find: bool,
     pub use_regex_search: bool,
@@ -2423,6 +2568,7 @@ impl Settings for VimSettings {
         Self {
             default_mode: vim.default_mode.unwrap().into(),
             toggle_relative_line_numbers: vim.toggle_relative_line_numbers.unwrap(),
+            squirrel_vim_mode_bridge: vim.squirrel_vim_mode_bridge.unwrap(),
             use_system_clipboard: vim.use_system_clipboard.unwrap(),
             use_smartcase_find: vim.use_smartcase_find.unwrap(),
             use_regex_search: vim.use_regex_search.unwrap(),

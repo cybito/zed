@@ -980,6 +980,8 @@ pub enum FileFinderWidthContent {
 pub struct VimSettingsContent {
     pub default_mode: Option<ModeContent>,
     pub toggle_relative_line_numbers: Option<bool>,
+    /// Coordinate Vim command/insert transitions with the custom Squirrel input method.
+    pub squirrel_vim_mode_bridge: Option<bool>,
     pub use_system_clipboard: Option<UseSystemClipboard>,
     pub use_smartcase_find: Option<bool>,
     pub use_regex_search: Option<bool>,

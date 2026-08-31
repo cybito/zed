@@ -2666,6 +2666,8 @@
   "vim": {
     "default_mode": "normal",
     "toggle_relative_line_numbers": false,
+    // Coordinate Vim command/insert transitions with a custom Squirrel build.
+    "squirrel_vim_mode_bridge": false,
     "use_system_clipboard": "always",
     "use_smartcase_find": false,
     "use_regex_search": true,
