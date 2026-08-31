@@ -2147,7 +2147,17 @@ impl Workspace {
             if is_empty_workspace && !serialized_workspace_has_paths {
                 let default_center_pane_visibility =
                     persistence::read_default_center_pane_visible(&kvp);
-                if let Some(default_docks) = persistence::read_default_dock_state(&kvp) {
+                if let Some(mut default_docks) = persistence::read_default_dock_state(&kvp) {
+                    for dock in [
+                        &mut default_docks.left,
+                        &mut default_docks.right,
+                        &mut default_docks.bottom,
+                    ] {
+                        if dock.active_panel.as_deref() == Some("AgentPanel") {
+                            dock.visible = false;
+                        }
+                    }
+
                     window
                         .update(cx, |_, window, cx| {
                             workspace.update(cx, |workspace, cx| {

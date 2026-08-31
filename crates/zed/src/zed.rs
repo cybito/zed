@@ -886,6 +886,12 @@ async fn initialize_agent_panel(
         .await?;
 
     workspace_handle.update_in(&mut cx, |workspace, window, cx| {
+        if workspace.visible_worktrees(cx).next().is_none()
+            && let Some(panel) = workspace.panel::<agent_ui::AgentPanel>(cx)
+        {
+            workspace.remove_panel(&panel, window, cx);
+        }
+
         cx.observe_global_in::<SettingsStore>(window, move |workspace, window, cx| {
             ensure_agent_panel_for_workspace(workspace, None, window, cx).detach_and_log_err(cx);
         })
