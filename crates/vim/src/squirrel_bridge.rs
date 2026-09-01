@@ -42,13 +42,26 @@ fn with_bridge<T>(callback: impl FnOnce(&mut SquirrelBridge) -> T) -> T {
     callback(&mut bridge)
 }
 
-#[derive(Default)]
 struct SquirrelBridge {
     enabled: bool,
     stream: Option<UnixStream>,
+    socket_path: PathBuf,
     next_request_id: u64,
     lease: Option<Lease>,
     lease_owner: Option<u64>,
+}
+
+impl Default for SquirrelBridge {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stream: None,
+            socket_path: socket_path(),
+            next_request_id: 0,
+            lease: None,
+            lease_owner: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -211,6 +224,7 @@ impl SquirrelBridge {
     }
 
     fn request(&mut self, method: &str, lease: Option<&Lease>) -> Result<Response, String> {
+        let reused_connection = self.stream.is_some();
         self.connect()?;
         self.next_request_id = self.next_request_id.wrapping_add(1);
         let request_id = self.next_request_id.to_string();
@@ -235,10 +249,16 @@ impl SquirrelBridge {
             .ok_or_else(|| "Squirrel bridge disconnected".to_owned())?;
         let length = u32::try_from(payload.len())
             .map_err(|_| "Squirrel bridge request exceeded the frame limit".to_owned())?;
-        stream
+        if let Err(error) = stream
             .write_all(&length.to_be_bytes())
             .and_then(|()| stream.write_all(&payload))
-            .map_err(|error| format!("failed to write to Squirrel: {error}"))?;
+        {
+            if reused_connection && error.kind() == std::io::ErrorKind::BrokenPipe {
+                self.stream.take();
+                return self.request(method, lease);
+            }
+            return Err(format!("failed to write to Squirrel: {error}"));
+        }
 
         let mut header = [0; 4];
         stream
@@ -271,7 +291,7 @@ impl SquirrelBridge {
         if self.stream.is_some() {
             return Ok(());
         }
-        let stream = UnixStream::connect(socket_path())
+        let stream = UnixStream::connect(&self.socket_path)
             .map_err(|error| format!("failed to connect to Squirrel: {error}"))?;
         stream
             .set_read_timeout(Some(REQUEST_TIMEOUT))
@@ -619,6 +639,104 @@ mod tests {
         server.join().expect("join test bridge");
     }
 
+    #[test]
+    fn reconnects_after_cached_connection_breaks() {
+        let socket_id = NEXT_TEST_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "zed-squirrel-bridge-test-{}-{socket_id}.sock",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind test bridge");
+        let (closed_sender, closed_receiver) = mpsc::sync_channel(0);
+        let server_path = path.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept stale test bridge");
+            let request = read_test_request(&mut stream);
+            assert_eq!(request["method"], "status");
+            write_test_response(
+                &mut stream,
+                &request,
+                json!({
+                    "version": 1,
+                    "status": "no_active_session"
+                }),
+            );
+            stream
+                .shutdown(std::net::Shutdown::Both)
+                .expect("close stale test bridge");
+            drop(stream);
+            closed_sender.send(()).expect("signal closed test bridge");
+
+            let (mut stream, _) = listener.accept().expect("accept fresh test bridge");
+            let request = read_test_request(&mut stream);
+            assert_eq!(request["method"], "status");
+            write_test_response(
+                &mut stream,
+                &request,
+                json!({
+                    "version": 1,
+                    "status": "ok",
+                    "sessionToken": "session",
+                    "sessionGeneration": 15
+                }),
+            );
+            let request = read_test_request(&mut stream);
+            assert_eq!(request["method"], "acquire_command");
+            write_test_response(
+                &mut stream,
+                &request,
+                json!({
+                    "version": 1,
+                    "status": "ok",
+                    "sessionToken": "session",
+                    "sessionGeneration": 15,
+                    "leaseId": "lease"
+                }),
+            );
+            std::fs::remove_file(server_path).expect("remove test socket");
+        });
+        let mut bridge = SquirrelBridge {
+            enabled: true,
+            stream: Some(UnixStream::connect(&path).expect("connect test bridge")),
+            socket_path: path,
+            ..Default::default()
+        };
+
+        assert_eq!(bridge.acquire_for_owner(1), PrepareResult::Unavailable);
+        closed_receiver.recv().expect("wait for closed test bridge");
+        let mut byte = [0];
+        assert_eq!(
+            bridge
+                .stream
+                .as_mut()
+                .expect("cached test bridge")
+                .read(&mut byte)
+                .expect("observe closed test bridge"),
+            0
+        );
+        assert_eq!(bridge.acquire_for_owner(1), PrepareResult::Ready);
+        server.join().expect("join test bridge");
+    }
+
+    fn read_test_request(stream: &mut UnixStream) -> Value {
+        let mut header = [0; 4];
+        stream.read_exact(&mut header).expect("read request header");
+        let length = u32::from_be_bytes(header) as usize;
+        let mut payload = vec![0; length];
+        stream.read_exact(&mut payload).expect("read request");
+        serde_json::from_slice(&payload).expect("decode request")
+    }
+
+    fn write_test_response(stream: &mut UnixStream, request: &Value, mut response: Value) {
+        response["requestId"] = request["requestId"].clone();
+        let payload = serde_json::to_vec(&response).expect("encode response");
+        stream
+            .write_all(&(payload.len() as u32).to_be_bytes())
+            .expect("write response header");
+        stream.write_all(&payload).expect("write response");
+    }
+
     fn test_server(responses: Vec<Value>) -> (PathBuf, thread::JoinHandle<()>) {
         let socket_id = NEXT_TEST_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -633,16 +751,8 @@ mod tests {
             ready_sender.send(()).expect("signal test bridge");
             let (mut stream, _) = listener.accept().expect("accept test bridge");
             for response in responses {
-                let mut header = [0; 4];
-                stream.read_exact(&mut header).expect("read request header");
-                let length = u32::from_be_bytes(header) as usize;
-                let mut payload = vec![0; length];
-                stream.read_exact(&mut payload).expect("read request");
-                let payload = serde_json::to_vec(&response).expect("encode response");
-                stream
-                    .write_all(&(payload.len() as u32).to_be_bytes())
-                    .expect("write response header");
-                stream.write_all(&payload).expect("write response");
+                let request = read_test_request(&mut stream);
+                write_test_response(&mut stream, &request, response);
             }
             drop(stream);
             std::fs::remove_file(server_path).expect("remove test socket");
