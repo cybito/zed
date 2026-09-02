@@ -210,7 +210,10 @@ impl SquirrelBridge {
             Ok(response) => response,
             Err(error) => return self.fail(error),
         };
-        if matches!(response.status.as_str(), "stale_session" | "no_lease") {
+        if matches!(
+            response.status.as_str(),
+            "stale_session" | "no_lease" | "no_active_session" | "session_unavailable"
+        ) {
             self.lease = None;
             self.lease_owner = None;
             return PrepareResult::Ready;
@@ -575,6 +578,43 @@ mod tests {
                 "version": 1,
                 "requestId": "3",
                 "status": "stale_session"
+            }),
+        ]);
+        let mut bridge = SquirrelBridge {
+            enabled: true,
+            ..Default::default()
+        };
+        bridge.stream = Some(UnixStream::connect(path).expect("connect test bridge"));
+
+        assert_eq!(bridge.acquire_for_owner(1), PrepareResult::Ready);
+        assert_eq!(bridge.release_for_owner(1), PrepareResult::Ready);
+        assert!(bridge.lease.is_none());
+        assert!(bridge.lease_owner.is_none());
+        server.join().expect("join test bridge");
+    }
+
+    #[test]
+    fn session_disappearing_during_release_clears_the_local_lease() {
+        let (path, server) = test_server(vec![
+            json!({
+                "version": 1,
+                "requestId": "1",
+                "status": "ok",
+                "sessionToken": "session",
+                "sessionGeneration": 13
+            }),
+            json!({
+                "version": 1,
+                "requestId": "2",
+                "status": "ok",
+                "sessionToken": "session",
+                "sessionGeneration": 13,
+                "leaseId": "lease"
+            }),
+            json!({
+                "version": 1,
+                "requestId": "3",
+                "status": "no_active_session"
             }),
         ]);
         let mut bridge = SquirrelBridge {
