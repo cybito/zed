@@ -159,7 +159,7 @@ impl MaxIdleRetainedThreads {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct TerminalId(uuid::Uuid);
 
 impl TerminalId {
