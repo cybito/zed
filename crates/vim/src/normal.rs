@@ -639,14 +639,15 @@ impl Vim {
 
     fn insert_after(&mut self, _: &InsertAfter, window: &mut Window, cx: &mut Context<Self>) {
         self.start_recording(cx);
-        self.switch_mode(Mode::Insert, false, window, cx);
         self.update_editor(cx, |_, editor, cx| {
+            editor.set_clip_at_line_ends(false, cx);
             editor.change_selections(Default::default(), window, cx, |s| {
                 s.move_cursors_with(&mut |map, cursor, _| {
                     (right(map, cursor, 1), SelectionGoal::None)
                 });
             });
         });
+        self.switch_mode(Mode::Insert, false, window, cx);
     }
 
     fn insert_before(&mut self, _: &InsertBefore, window: &mut Window, cx: &mut Context<Self>) {
@@ -1494,6 +1495,24 @@ mod test {
         cx.simulate_at_each_offset("a", "The qˇuicˇk")
             .await
             .assert_matches();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn test_a_at_end_of_file_with_squirrel_bridge(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings
+                    .vim
+                    .get_or_insert_default()
+                    .squirrel_vim_mode_bridge = Some(true);
+            });
+        });
+        cx.set_state("abˇc", Mode::Normal);
+        cx.simulate_keystrokes("a");
+        cx.run_until_parked();
+        cx.assert_state("abcˇ", Mode::Insert);
     }
 
     #[gpui::test]
