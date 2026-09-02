@@ -466,7 +466,14 @@ impl Dock {
         .detach();
 
         cx.observe_in(&dock, window, move |workspace, dock, window, cx| {
-            if dock.read(cx).is_open()
+            let dock_is_open = dock.read(cx).is_open();
+            match position {
+                DockPosition::Bottom if dock_is_open => workspace.show_center_pane(window, cx),
+                DockPosition::Bottom => workspace.hide_center_pane_if_empty(window, cx),
+                DockPosition::Left | DockPosition::Right => cx.notify(),
+            }
+
+            if dock_is_open
                 && let Some(panel) = dock.read(cx).active_panel()
                 && panel.is_zoomed(window, cx)
             {
@@ -1528,6 +1535,7 @@ pub mod test {
         pub default_size: Pixels,
         pub flexible: bool,
         pub activation_priority: u32,
+        pub is_agent: bool,
     }
     actions!(test_only, [ToggleTestPanel]);
 
@@ -1543,7 +1551,15 @@ pub mod test {
                 activation_focus_handle: None,
                 default_size: px(300.),
                 flexible: false,
+                is_agent: false,
                 activation_priority,
+            }
+        }
+
+        pub fn new_agent(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
+            Self {
+                is_agent: true,
+                ..Self::new(position, activation_priority, cx)
             }
         }
 
@@ -1574,6 +1590,7 @@ pub mod test {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .id("test")
+                .debug_selector(|| "test".into())
                 .track_focus(&self.focus_handle(cx))
                 .children(self.activation_focus_handle.iter().map(|focus_handle| {
                     div().id("test-activation-child").track_focus(focus_handle)
@@ -1663,6 +1680,10 @@ pub mod test {
 
         fn activation_priority(&self) -> u32 {
             self.activation_priority
+        }
+
+        fn is_agent_panel(&self) -> bool {
+            self.is_agent
         }
     }
 

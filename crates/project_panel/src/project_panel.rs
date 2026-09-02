@@ -895,7 +895,9 @@ impl ProjectPanel {
                     allow_preview,
                 } => {
                     if let Some(worktree) = project.read(cx).worktree_for_entry(entry_id, cx)
-                        && let Some(entry) = worktree.read(cx).entry_for_id(entry_id) {
+                        && let Some(entry) = worktree.read(cx).entry_for_id(entry_id)
+                        && entry.is_file()
+                    {
                             let file_path = entry.path.clone();
                             let worktree_id = worktree.read(cx).id();
                             let entry_id = entry.id;
