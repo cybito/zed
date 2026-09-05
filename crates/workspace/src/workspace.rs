@@ -2292,15 +2292,33 @@ impl Workspace {
         }
     }
 
-    fn center_area_has_focus(&self, window: &Window, cx: &App) -> bool {
-        self.panes
+    fn focus_visible_panel(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let visible_panel = self
+            .all_docks()
             .iter()
-            .any(|pane| pane.read(cx).has_focus(window, cx))
-            || self
-                .bottom_dock
-                .read(cx)
-                .focus_handle(cx)
-                .contains_focused(window, cx)
+            .find_map(|dock| {
+                let panel = dock.read(cx).visible_panel()?;
+                panel.is_agent_panel(cx).then_some(panel)
+            })
+            .or_else(|| {
+                self.all_docks()
+                    .iter()
+                    .find_map(|dock| dock.read(cx).visible_panel())
+            });
+        let Some(panel) = visible_panel else {
+            return;
+        };
+
+        let focus_handle = panel.activation_focus_handle(cx);
+        window.focus(&focus_handle, cx);
+    }
+
+    fn focus_center_area(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = self.active_item(cx) {
+            item.item_focus_handle(cx).focus(window, cx);
+        } else {
+            window.focus(&self.active_pane.read(cx).focus_handle(cx), cx);
+        }
     }
 
     fn set_center_pane_visible(
@@ -2310,14 +2328,15 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let was_visible = self.is_center_pane_visible(cx);
-        let hidden_area_had_focus = !visible && self.center_area_has_focus(window, cx);
         self.center_pane_visible = Some(visible);
 
         if was_visible != visible {
             cx.notify();
             self.serialize_workspace(window, cx);
-            if hidden_area_had_focus {
-                self.move_part_focus(true, window, cx);
+            if visible {
+                self.focus_center_area(window, cx);
+            } else {
+                self.focus_visible_panel(window, cx);
             }
         }
     }
@@ -2336,10 +2355,9 @@ impl Workspace {
         if self.items(cx).next().is_none() && !self.bottom_dock.read(cx).is_open() {
             if matches!(AgentSettings::get_layout(cx), WindowLayout::Agent(_)) {
                 let was_visible = self.is_center_pane_visible(cx);
-                let hidden_area_had_focus = was_visible && self.center_area_has_focus(window, cx);
                 self.restore_center_pane_visibility(None, cx);
-                if was_visible && !self.is_center_pane_visible(cx) && hidden_area_had_focus {
-                    self.move_part_focus(true, window, cx);
+                if was_visible && !self.is_center_pane_visible(cx) {
+                    self.focus_visible_panel(window, cx);
                 }
             } else {
                 self.set_center_pane_visible(false, window, cx);
@@ -4446,8 +4464,12 @@ impl Workspace {
         }
 
         if focus_center {
-            self.active_pane
-                .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx))
+            if self.is_center_pane_visible(cx) {
+                self.active_pane
+                    .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
+            } else {
+                self.set_center_pane_visible(true, window, cx);
+            }
         }
 
         cx.notify();
@@ -4466,6 +4488,9 @@ impl Workspace {
             dock.update(cx, |dock, cx| {
                 dock.set_open(false, window, cx);
             });
+            if !self.is_center_pane_visible(cx) {
+                self.set_center_pane_visible(true, window, cx);
+            }
             return true;
         }
         false
@@ -4479,7 +4504,11 @@ impl Workspace {
             });
         }
 
-        cx.focus_self(window);
+        if self.is_center_pane_visible(cx) {
+            cx.focus_self(window);
+        } else {
+            self.set_center_pane_visible(true, window, cx);
+        }
         cx.notify();
         self.serialize_workspace(window, cx);
     }
@@ -4627,9 +4656,9 @@ impl Workspace {
     ) -> Option<Arc<dyn PanelHandle>> {
         let mut result_panel = None;
         let mut serialize = false;
+        let mut focus_center = false;
         for dock in self.all_docks() {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
-                let mut focus_center = false;
                 let panel = dock.update(cx, |dock, cx| {
                     dock.activate_panel(panel_index, window, cx);
 
@@ -4645,14 +4674,18 @@ impl Workspace {
                     panel
                 });
 
-                if focus_center {
-                    self.active_pane
-                        .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx))
-                }
-
                 result_panel = panel;
                 serialize = true;
                 break;
+            }
+        }
+
+        if focus_center {
+            if self.is_center_pane_visible(cx) {
+                self.active_pane
+                    .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
+            } else {
+                self.set_center_pane_visible(true, window, cx);
             }
         }
 
@@ -18434,11 +18467,17 @@ mod tests {
 
         workspace.update_in(cx, |workspace, window, cx| {
             assert!(!pane.read(cx).has_focus(window, cx));
+            let agent_panel = workspace
+                .left_dock()
+                .read(cx)
+                .panel::<TestPanel>()
+                .expect("agent panel should remain mounted");
             assert!(
-                workspace
-                    .focusable_parts(cx)
-                    .iter()
-                    .any(|part| part.contains_focused(window, cx))
+                agent_panel
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx),
+                "Auto-hiding the center pane should focus the visible agent panel"
             );
         });
 
@@ -18645,9 +18684,16 @@ mod tests {
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
 
-        workspace.update_in(cx, |workspace, window, cx| {
-            let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
-            workspace.add_panel(panel, window, cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(left_panel, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+
+            let panel = cx.new(|cx| TestPanel::new_agent(DockPosition::Right, 101, cx));
+            workspace.add_panel(panel.clone(), window, cx);
             workspace.right_dock().update(cx, |dock, cx| {
                 dock.activate_panel(0, window, cx);
                 dock.set_open(true, window, cx);
@@ -18655,14 +18701,13 @@ mod tests {
             workspace.focus_center_pane(window, cx);
             assert!(workspace.active_pane().read(cx).has_focus(window, cx));
             workspace.set_center_pane_visible(false, window, cx);
+            panel
         });
         workspace.update_in(cx, |workspace, window, cx| {
             assert!(!workspace.active_pane().read(cx).has_focus(window, cx));
             assert!(
-                workspace
-                    .focusable_parts(cx)
-                    .iter()
-                    .any(|part| part.contains_focused(window, cx))
+                panel.read(cx).focus_handle(cx).contains_focused(window, cx),
+                "Hiding the center pane should focus the visible agent panel"
             );
         });
     }
