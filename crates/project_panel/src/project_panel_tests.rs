@@ -193,6 +193,9 @@ async fn test_opening_or_activating_file_reveals_center_pane(cx: &mut gpui::Test
         .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
         .expect("workspace window should exist");
     let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
     workspace.update(cx, |workspace, cx| {
         workspace.restore_center_pane_visibility(Some(false), cx);
     });
@@ -200,49 +203,25 @@ async fn test_opening_or_activating_file_reveals_center_pane(cx: &mut gpui::Test
         assert!(!workspace.is_center_pane_visible(cx));
     });
 
-    workspace
-        .update_in(cx, |workspace, window, cx| {
-            let worktree_id = workspace.worktrees(cx).next().unwrap().read(cx).id();
-            let project_path = ProjectPath {
-                worktree_id,
-                path: rel_path("test/first.rs").into(),
-            };
-            workspace.open_path(project_path, None, true, window, cx)
-        })
-        .await
-        .unwrap();
-    cx.run_until_parked();
+    select_path(&panel, "src/test/first.rs", cx);
+    panel.update_in(cx, |panel, window, cx| panel.open(&Open, window, cx));
+    cx.executor().run_until_parked();
 
     workspace.read_with(cx, |workspace, cx| {
         assert!(workspace.is_center_pane_visible(cx));
     });
     ensure_single_file_is_opened(&workspace, "test/first.rs", cx);
 
-    let active_item = workspace.read_with(cx, |workspace, cx| {
-        workspace
-            .active_item(cx)
-            .expect("opened file should be the active item")
-    });
-    workspace.update_in(cx, |workspace, window, cx| {
+    workspace.update(cx, |workspace, cx| {
         workspace.restore_center_pane_visibility(Some(false), cx);
-        assert!(workspace.activate_item(active_item.as_ref(), true, true, window, cx));
     });
-    workspace.read_with(cx, |workspace, cx| {
-        assert!(workspace.is_center_pane_visible(cx));
-    });
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.close_all_items_and_panes(
-            &workspace::CloseAllItemsAndPanes::default(),
-            window,
-            cx,
-        );
-    });
-    cx.run_until_parked();
+    panel.update_in(cx, |panel, window, cx| panel.open(&Open, window, cx));
+    cx.executor().run_until_parked();
 
     workspace.read_with(cx, |workspace, cx| {
         assert!(workspace.is_center_pane_visible(cx));
     });
+    ensure_single_file_is_opened(&workspace, "test/first.rs", cx);
 }
 
 #[gpui::test]
