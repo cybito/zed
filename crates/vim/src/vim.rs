@@ -1110,6 +1110,25 @@ impl Vim {
         if from_command_mode == to_command_mode {
             return false;
         }
+
+        let owner = cx.entity().entity_id().as_u64();
+        if !to_command_mode {
+            let task =
+                cx.background_spawn(async move { squirrel_bridge::set_mode(true, owner, false) });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                if let squirrel_bridge::PrepareResult::Faulted(message) = result
+                    && let Err(error) = this.update_in(cx, |this, window, cx| {
+                        this.report_squirrel_bridge_fault(&message, window, cx);
+                    })
+                {
+                    log::error!("failed to finish Squirrel Vim mode transition: {error}");
+                }
+            })
+            .detach();
+            return false;
+        }
+
         if matches!(
             self.squirrel_bridge_transition,
             SquirrelBridgeTransitionState::Pending
@@ -1118,11 +1137,7 @@ impl Vim {
         }
 
         self.squirrel_bridge_transition = SquirrelBridgeTransitionState::Pending;
-        let owner = cx.entity().entity_id().as_u64();
-        let task =
-            cx.background_spawn(
-                async move { squirrel_bridge::set_mode(true, owner, to_command_mode) },
-            );
+        let task = cx.background_spawn(async move { squirrel_bridge::set_mode(true, owner, true) });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             if let Err(error) = this.update_in(cx, |this, window, cx| {
