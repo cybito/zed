@@ -193,7 +193,14 @@ INSTALL
     for attempt in {1..90}; do
       xwininfo -root -tree > "$ZED_SMOKE_DIAGNOSTICS/window.txt"
       if grep -q smoke.txt "$ZED_SMOKE_DIAGNOSTICS/window.txt"; then
-        import -window root "$ZED_SMOKE_DIAGNOSTICS/window.png"
+        window_id=$(awk '/"smoke.txt"/ { print $1; exit }' "$ZED_SMOKE_DIAGNOSTICS/window.txt")
+        [[ -n $window_id ]] || { echo "Smoke window has no X11 ID" >&2; exit 1; }
+        import -window "$window_id" "$ZED_SMOKE_DIAGNOSTICS/window.png"
+        colors=$(identify -format '%k' "$ZED_SMOKE_DIAGNOSTICS/window.png")
+        if [[ ! $colors =~ ^[0-9]+$ ]] || (( colors <= 16 )); then
+          echo "Smoke window screenshot is blank ($colors unique colors)" >&2
+          exit 1
+        fi
         exit 0
       fi
       kill -0 "$pid"
