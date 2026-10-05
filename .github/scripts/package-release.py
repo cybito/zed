@@ -165,6 +165,7 @@ def require_matching_bytes(local, remote):
 
 def publish(args):
     validate_package(args.directory, args.tag, args.commit, args.platform)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     assets = release_assets(args.tag)
     existing = remote_package(args.tag, args.commit, args.platform, assets, args.output_dir)
     expected = {p.name: p for p in args.directory.iterdir()}
