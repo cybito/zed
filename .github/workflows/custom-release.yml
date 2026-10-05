@@ -270,7 +270,7 @@ jobs:
               if not result['exists']: raise SystemExit('missing platform assets')
               for name in result['assets']:
                   asset = next(a for a in assets if a['name'] == name)
-                  links.append((platform, name, asset['browser_download_url']))
+                  links.append((platform, name, asset['url']))
           release = json.loads(subprocess.check_output(['gh','api','repos/cybito/zed/releases/tags/' + tag],text=True))
           start, end = '<!-- custom-builds:start -->', '<!-- custom-builds:end -->'
           body = release.get('body') or ''
