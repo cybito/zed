@@ -60,7 +60,7 @@ INSTALL
   hdiutil create -volname 'Zed Dev Custom' -srcfolder "$staging" -ov -format UDZO "$out/zed-$tag-darwin-arm64.dmg"
   rm -rf "$staging"
   cp target/zed-remote-server-macos-aarch64.gz "$out/zed-remote-server-$tag-darwin-arm64.gz"
-  [[ $platform == linux ]]
+else
   available=$(df -Pk . | awk 'NR==2 {print $4}')
   if (( available < 26214400 )); then
     sudo rm -rf /usr/share/dotnet /usr/local/share/powershell /usr/local/lib/android/sdk

@@ -19,6 +19,9 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Test Zed platform build dispatch
+        run: bash .github/scripts/custom-release-regressions.sh
+
       - id: identity
         env:
           EXPECTED_REPOSITORY: cybito/zed

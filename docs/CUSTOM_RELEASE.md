@@ -153,7 +153,9 @@ emits reference/digest; `verify` emits the validated receipt.
 The build entry is `custom-release.sh build PLATFORM TAG SHA ABS_OUTPUT`.
 No registry write credential is supplied until build/install/GUI smoke succeeds.
 The upload step uses a private temporary auth configuration and deletes it in
-an always-run cleanup step. The workflow includes real isolated-Git regressions
-for custom ancestry, upstream-only commits, malformed tags and shell-like input.
+an always-run cleanup step. The workflow includes isolated-Git regressions for
+custom ancestry, upstream-only commits, malformed tags and shell-like input.
+Its validate job also runs a CLI-level dispatch regression with stubbed native
+build tools to prove Darwin and Linux select only their own build branch.
 
 This migration does not alter infra-as-code consumers or deployment pins.
