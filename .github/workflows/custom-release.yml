@@ -1,0 +1,288 @@
+name: Custom release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+concurrency:
+  group: custom-release-${{ github.repository }}-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      sha: ${{ steps.identity.outputs.sha }}
+      tag: ${{ steps.identity.outputs.tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: identity
+        env:
+          EXPECTED_REPOSITORY: cybito/zed
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          release = event['release']
+          tag = release['tag_name']
+          def validate_tag(repo, tag, draft, cwd=None):
+              if repo != 'cybito/zed' or draft or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+-custom\.[1-9][0-9]*', tag):
+                  raise ValueError('invalid release event')
+              sha = subprocess.check_output(['git','rev-parse','refs/tags/' + tag + '^{commit}'],cwd=cwd,text=True).strip()
+              subprocess.run(['git','merge-base','--is-ancestor',sha,'origin/custom'],cwd=cwd,check=True)
+              return sha
+          # Boundary regressions exercise real, isolated Git ancestry, not workflow text.
+          import tempfile
+          with tempfile.TemporaryDirectory() as directory:
+              def fixture(*args):
+                  return subprocess.check_output(['git',*args],cwd=directory,text=True).strip()
+              fixture('init','-b','custom')
+              fixture('config','user.email','fixture@example.invalid')
+              fixture('config','user.name','fixture')
+              fixture('commit','--allow-empty','-m','base')
+              base = fixture('rev-parse','HEAD')
+              fixture('tag','v1.18.0-custom.1')
+              fixture('update-ref','refs/remotes/origin/custom',base)
+              assert validate_tag('cybito/zed','v1.18.0-custom.1',False,directory) == base
+              fixture('checkout','-b','upstream-only')
+              fixture('commit','--allow-empty','-m','upstream-only')
+              fixture('tag','v1.18.0-custom.2')
+              for bad in ['v1.18.0-custom.2','v1.18.0','v1.18.0-custom.0','$(touch PWNED)']:
+                  try: validate_tag('cybito/zed',bad,False,directory)
+                  except (ValueError,subprocess.CalledProcessError): pass
+                  else: raise AssertionError('invalid tag accepted: ' + bad)
+              assert not (Path(directory)/'PWNED').exists()
+          if os.environ['GITHUB_REPOSITORY'] != os.environ['EXPECTED_REPOSITORY']:
+              raise SystemExit('wrong repository')
+          # Reject the name before passing it even as a Git argv element.
+          if release.get('draft') or release.get('assets') or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+-custom\.[1-9][0-9]*',tag):
+              raise SystemExit('invalid release event or attached GitHub assets')
+          def git(*args): return subprocess.check_output(['git', *args], text=True).strip()
+          subprocess.run(['git','fetch','origin','refs/heads/custom:refs/remotes/origin/custom', '+refs/tags/' + tag + ':refs/tags/' + tag],check=True)
+          sha = validate_tag(os.environ['GITHUB_REPOSITORY'],tag,release['draft'])
+          if git('rev-parse','HEAD') != sha:
+              raise SystemExit('checkout is not exact release tag commit')
+          for path in ['.github/workflows/custom-release.yml','.github/scripts/custom-release.sh','.github/scripts/package-release.py']:
+              git('cat-file','-e',sha + ':' + path)
+          subprocess.run(['git','checkout','--detach',sha],check=True)
+          version = subprocess.check_output(['script/get-crate-version','zed'],text=True).strip()
+          if not tag.startswith('v' + version + '-custom.') or Path('crates/zed/RELEASE_CHANNEL').read_text().strip() != 'dev':
+              raise SystemExit('release version/channel differs from source')
+          import importlib.util
+          from unittest.mock import patch
+          spec = importlib.util.spec_from_file_location('package_release','.github/scripts/package-release.py')
+          helper = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(helper)
+          with tempfile.TemporaryDirectory() as fixture_dir:
+              destination = Path(fixture_dir)/'pull'
+              for error in [b'UNAUTHORIZED: authentication required',b'dial tcp: network timeout']:
+                  response = subprocess.CompletedProcess([],1,b'',error)
+                  with patch.object(helper.subprocess,'run',return_value=response):
+                      try: helper.check(tag,sha,'linux',destination)
+                      except RuntimeError: pass
+                      else: raise AssertionError('registry error treated as missing')
+              response = subprocess.CompletedProcess([],1,b'',b'MANIFEST_UNKNOWN: manifest unknown')
+              with patch.object(helper.subprocess,'run',return_value=response):
+                  assert helper.check(tag,sha,'linux',destination) == {'exists':False}
+              descriptor = subprocess.CompletedProcess([],0,json.dumps({'digest':'sha256:' + 'a'*64}).encode(),b'')
+              wrong = {'release_tag':tag,'source_commit':'0'*40,'platform':'linux'}
+              with patch.object(helper.subprocess,'run',return_value=descriptor), patch.object(helper,'verify',return_value=wrong):
+                  try: helper.check(tag,sha,'linux',destination)
+                  except ValueError: pass
+                  else: raise AssertionError('wrong source receipt reused')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+              output.write('sha=' + sha + '\ntag=' + tag + '\n')
+          PY
+  build:
+    needs: validate
+    environment: forgejo-registry
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin
+            runner: macos-26
+          - platform: linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    concurrency:
+      group: custom-build-${{ github.repository }}-${{ needs.validate.outputs.tag }}-${{ matrix.platform }}
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      SOURCE_SHA: ${{ needs.validate.outputs.sha }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned ORAS 1.3.3
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, platform, tarfile, urllib.request
+          from pathlib import Path
+          system = 'darwin' if platform.system() == 'Darwin' else 'linux'
+          filename = 'oras_1.3.3_' + system + '_arm64.tar.gz'
+          pinned = {'darwin':'f33fc12753c54172b0d0d19eaa0318d3f90fe9b094d96e8b259c881713c92e1c','linux':'ac7156f93a21e903f7ad606c792f3560f17e0cd0e36365634701b1e7cc4e4eca'}[system]
+          url = 'https://github.com/oras-project/oras/releases/download/v1.3.3/'
+          sums = urllib.request.urlopen(url + 'oras_1.3.3_checksums.txt').read().decode()
+          expected = [line.split()[0] for line in sums.splitlines() if line.split()[-1].lstrip('*') == filename]
+          data = urllib.request.urlopen(url + filename).read()
+          if len(expected) != 1 or expected[0] != pinned or hashlib.sha256(data).hexdigest() != pinned: raise SystemExit('ORAS pinned checksum mismatch')
+          root = Path(os.environ['RUNNER_TEMP']) / 'oras-tools'
+          root.mkdir()
+          archive = root / filename
+          archive.write_bytes(data)
+          with tarfile.open(archive) as tar: tar.extract('oras', root, filter='data')
+          with open(os.environ['GITHUB_PATH'],'a') as path: path.write(str(root) + '\n')
+          PY
+      - name: Prepare isolated anonymous registry configuration
+        env:
+          ORAS_REGISTRY_CONFIG: ${{ runner.temp }}/anonymous-registry.json
+        run: |
+          umask 077
+          printf '{"auths":{}}\n' > "$ORAS_REGISTRY_CONFIG"
+          chmod 600 "$ORAS_REGISTRY_CONFIG"
+      - name: Check immutable publication before building
+        id: check
+        env:
+          ORAS_REGISTRY_CONFIG: ${{ runner.temp }}/anonymous-registry.json
+        run: |
+          python3 .github/scripts/package-release.py check --tag "$RELEASE_TAG" --commit "$SOURCE_SHA" --platform "$PLATFORM" --output-dir "$RUNNER_TEMP/existing" > "$RUNNER_TEMP/check.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          value = json.loads((Path(os.environ['RUNNER_TEMP'])/'check.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+              output.write('exists=' + str(value['exists']).lower() + '\n')
+          if value['exists']:
+              with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as output: output.write('Reused verified immutable package: `' + value['reference'] + '`\n')
+          PY
+      - name: Install Rust 1.97.1
+        if: steps.check.outputs.exists == 'false'
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Build, install and native GUI smoke
+        if: steps.check.outputs.exists == 'false'
+        run: bash .github/scripts/custom-release.sh build "$PLATFORM" "$RELEASE_TAG" "$SOURCE_SHA" "$RUNNER_TEMP/build"
+      - name: Package release
+        if: steps.check.outputs.exists == 'false'
+        run: python3 .github/scripts/package-release.py pack --tag "$RELEASE_TAG" --commit "$SOURCE_SHA" --platform "$PLATFORM" --input-dir "$RUNNER_TEMP/build" --output-dir "$RUNNER_TEMP/package"
+      - name: Publish and pull by immutable digest
+        if: steps.check.outputs.exists == 'false'
+        env:
+          FORGEJO_REGISTRY_TOKEN: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+        run: |
+          set +x
+          umask 077
+          mkdir -m 700 "$RUNNER_TEMP/registry-private"
+          auth="$RUNNER_TEMP/registry-private/auth.json"
+          printf '%s' "$FORGEJO_REGISTRY_TOKEN" | oras login git.cybit.top --username cybit --password-stdin --registry-config "$auth"
+          chmod 600 "$auth"
+          export ORAS_REGISTRY_CONFIG="$auth"
+          cd "$RUNNER_TEMP/build/diagnostics"
+          python3 - <<'PY'
+          import json, os, subprocess, hashlib, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          config = os.environ['ORAS_REGISTRY_CONFIG']
+          target = 'git.cybit.top/cybit/ias-zed:' + os.environ['RELEASE_TAG'] + '-' + os.environ['PLATFORM'] + '-arm64-smoke'
+          probe = subprocess.run(['oras','manifest','fetch','--descriptor',target,'--registry-config',config],capture_output=True)
+          if probe.returncode:
+              if not re.search(r'\b(MANIFEST_UNKNOWN|NAME_UNKNOWN|manifest unknown|name unknown)\b',probe.stderr.decode()):
+                  raise SystemExit(probe.stderr.decode())
+              subprocess.run(['oras','push',target,'--artifact-type','application/vnd.cybito.gui-smoke.v1','--registry-config',config,'--annotation','org.opencontainers.image.source=https://github.com/cybito/zed.git','--annotation','org.opencontainers.image.revision=' + os.environ['SOURCE_SHA'],'--annotation','org.opencontainers.image.version=' + os.environ['RELEASE_TAG'],'window.png:image/png','window.txt:text/plain','gui.log:text/plain','help.txt:text/plain','version.txt:text/plain'],check=True)
+              probe = subprocess.run(['oras','manifest','fetch','--descriptor',target,'--registry-config',config],capture_output=True,check=True)
+          descriptor = json.loads(probe.stdout)
+          reference = 'git.cybit.top/cybit/ias-zed@' + descriptor['digest']
+          raw = subprocess.check_output(['oras','manifest','fetch',reference,'--registry-config',config])
+          if 'sha256:' + hashlib.sha256(raw).hexdigest() != descriptor['digest']: raise SystemExit('diagnostic manifest mismatch')
+          manifest = json.loads(raw)
+          if manifest.get('artifactType') != 'application/vnd.cybito.gui-smoke.v1' or manifest.get('annotations',{}).get('org.opencontainers.image.revision') != os.environ['SOURCE_SHA']:
+              raise SystemExit('diagnostic identity mismatch; refusing reuse')
+          if {layer['annotations']['org.opencontainers.image.title'] for layer in manifest['layers']} != {'window.png','window.txt','gui.log','help.txt','version.txt'}:
+              raise SystemExit('unexpected diagnostic layers')
+          subprocess.run(['oras','pull',reference,'--output',str(root/'diagnostic-pull'),'--registry-config',config],check=True)
+          for layer in json.loads(raw)['layers']:
+              name = layer['annotations']['org.opencontainers.image.title']
+              data = (root/'diagnostic-pull'/name).read_bytes()
+              if 'sha256:' + hashlib.sha256(data).hexdigest() != layer['digest'] or len(data) != layer['size']: raise SystemExit('diagnostic layer mismatch')
+          os.chdir(os.environ['GITHUB_WORKSPACE'])
+          result = json.loads(subprocess.check_output(['python3','.github/scripts/package-release.py','publish','--directory',str(root/'package'),'--registry-config',config],text=True))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as output:
+              output.write('Installation: `' + result['reference'] + '`\n\nGUI evidence: `' + reference + '`\n')
+          PY
+      - name: Remove registry credentials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/registry-private/auth.json"
+          unset FORGEJO_REGISTRY_TOKEN ORAS_REGISTRY_CONFIG
+  summarize:
+    needs: [validate, build]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      SOURCE_SHA: ${{ needs.validate.outputs.sha }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: cybito/zed
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - name: Prepare isolated anonymous registry configuration
+        env:
+          ORAS_REGISTRY_CONFIG: ${{ runner.temp }}/anonymous-registry.json
+        run: |
+          umask 077
+          printf '{"auths":{}}\n' > "$ORAS_REGISTRY_CONFIG"
+          chmod 600 "$ORAS_REGISTRY_CONFIG"
+      - name: Verify anonymous packages and preserve release notes
+        env:
+          ORAS_REGISTRY_CONFIG: ${{ runner.temp }}/anonymous-registry.json
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess, tarfile, urllib.request
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          name = 'oras_1.3.3_linux_arm64.tar.gz'
+          url = 'https://github.com/oras-project/oras/releases/download/v1.3.3/'
+          checksums = urllib.request.urlopen(url + 'oras_1.3.3_checksums.txt').read().decode()
+          pinned = 'ac7156f93a21e903f7ad606c792f3560f17e0cd0e36365634701b1e7cc4e4eca'
+          expected = [line.split()[0] for line in checksums.splitlines() if line.split()[-1].lstrip('*') == name]
+          raw = urllib.request.urlopen(url + name).read()
+          if len(expected) != 1 or expected[0] != pinned or hashlib.sha256(raw).hexdigest() != pinned: raise SystemExit('ORAS pinned checksum mismatch')
+          archive = root/name
+          archive.write_bytes(raw)
+          with tarfile.open(archive) as tar: tar.extract('oras',root,filter='data')
+          os.environ['PATH'] = str(root) + os.pathsep + os.environ['PATH']
+          tag = os.environ['RELEASE_TAG']
+          references = []
+          for platform in ['darwin','linux']:
+              result = json.loads(subprocess.check_output(['python3','.github/scripts/package-release.py','check','--tag',tag,'--commit',os.environ['SOURCE_SHA'],'--platform',platform,'--output-dir',str(root/platform)],text=True))
+              if not result['exists']: raise SystemExit('missing platform')
+              references.append((platform,result['reference']))
+          release = json.loads(subprocess.check_output(['gh','api','repos/cybito/zed/releases/tags/' + tag],text=True))
+          if release['assets']: raise SystemExit('GitHub release assets must be empty')
+          start, end = '<!-- custom-builds:start -->', '<!-- custom-builds:end -->'
+          body = release.get('body') or ''
+          if (start in body) != (end in body) or body.count(start) > 1 or body.count(end) > 1: raise SystemExit('malformed notes block')
+          block = start + '\n## Custom ARM64 installations\n\nSource: `' + os.environ['SOURCE_SHA'] + '`; release: `' + tag + '`\n\n[Forgejo package](https://git.cybit.top/cybit/-/packages/container/ias-zed)\n\n'
+          for platform, reference in references:
+              block += '**' + platform + '**: `' + reference + '`\n\n```sh\noras pull ' + reference + '\n```\n\n'
+          block += end
+          if start in body:
+              a, b = body.index(start), body.index(end)
+              if b < a: raise SystemExit('malformed notes block')
+              body = body[:a] + block + body[b+len(end):]
+          else: body = body.rstrip() + '\n\n' + block
+          subprocess.run(['gh','api','--method','PATCH','repos/cybito/zed/releases/' + str(release['id']),'--input','-'],input=json.dumps({'body':body}),text=True,check=True)
+          PY
