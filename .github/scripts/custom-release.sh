@@ -221,6 +221,6 @@ if version.split('-custom.')[0] not in Path(version_file).read_text():
 PY
 python3 - "$out/toolchains.json" <<'PY'
 import json, subprocess, sys
-value = {name: subprocess.check_output(command, text=True).strip() for name, command in {'rustc':['rustc','--version'], 'cargo':['cargo','--version'], 'oras':['oras','version']}.items()}
+value = {name: subprocess.check_output(command, text=True).strip() for name, command in {'rustc':['rustc','--version'], 'cargo':['cargo','--version']}.items()}
 json.dump(value, open(sys.argv[1], 'w'), sort_keys=True)
 PY
