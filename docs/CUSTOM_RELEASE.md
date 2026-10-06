@@ -11,8 +11,8 @@
 Only a **published GitHub Release** triggers `.github/workflows/custom-release.yml`.
 Pushes, tag pushes and pull requests do not publish. The tag must be
 `v<crates/zed/Cargo.toml version>-custom.<positive integer>`; the current base is
-`1.18.0`; this migration's first fully validated asset release uses
-`v1.18.0-custom.8`. Existing release tags are never moved. The tag commit must be
+`1.18.0`; the editor-surface smoke release candidate uses
+`v1.18.0-custom.9`. Existing release tags are never moved. The tag commit must be
 an ancestor of `origin/custom` and contain the workflow and scripts. Both platforms
 check out exactly that commit; later pushes cannot change the build.
 
@@ -25,13 +25,13 @@ setup is needed. The summary job also has `contents: write` to update notes.
 Publish the release targeting the pushed custom SHA:
 
 ```sh
-gh release create v1.18.0-custom.8 --repo cybito/zed \
-  --target <custom-commit-sha> --title v1.18.0-custom.8 \
+gh release create v1.18.0-custom.9 --repo cybito/zed \
+  --target <custom-commit-sha> --title v1.18.0-custom.9 \
   --notes 'Custom Zed Dev; installation packages are attached to this GitHub Release.'
 ```
 
-This file describes the implementation, not a claim that hosted builds have
-already succeeded.
+Release `.8` completed its hosted build. `.9` enables Zed's software-GPU override
+so Linux GUI smoke can capture the editor beyond its initial unsupported-GPU dialog.
 
 ## Build and storage contract
 
@@ -71,15 +71,15 @@ platform's assets with a matching pattern:
 ```sh
 mkdir -p /tmp/zed-download
 cd /tmp/zed-download
-gh release download v1.18.0-custom.8 --repo cybito/zed \
-  --pattern 'v1.18.0-custom.8-linux-*'
-prefix='v1.18.0-custom.8-linux-'
+gh release download v1.18.0-custom.9 --repo cybito/zed \
+  --pattern 'v1.18.0-custom.9-linux-*'
+prefix='v1.18.0-custom.9-linux-'
 for file in "$prefix"*; do mv "$file" "${file#"$prefix"}"; done
 sha256sum -c SHA256SUMS
 ```
 
 Asset names include release tag and platform; for example:
-`v1.18.0-custom.8-linux-zed-v1.18.0-custom.8-linux-arm64.tar.gz`.
+`v1.18.0-custom.9-linux-zed-v1.18.0-custom.9-linux-arm64.tar.gz`.
 The loop restores the package's original filenames for checksum and install
 commands below.
 
@@ -87,7 +87,7 @@ Linux:
 
 ```sh
 mkdir /tmp/zed-unpacked
-tar -xzf /tmp/zed-download/zed-v1.18.0-custom.8-linux-arm64.tar.gz -C /tmp/zed-unpacked
+tar -xzf /tmp/zed-download/zed-v1.18.0-custom.9-linux-arm64.tar.gz -C /tmp/zed-unpacked
 /tmp/zed-unpacked/install.sh --prefix /absolute/install-prefix
 ```
 
@@ -101,13 +101,13 @@ macOS:
 ```sh
 mkdir -p /tmp/zed-darwin-download
 cd /tmp/zed-darwin-download
-gh release download v1.18.0-custom.8 --repo cybito/zed \
-  --pattern 'v1.18.0-custom.8-darwin-*'
-prefix='v1.18.0-custom.8-darwin-'
+gh release download v1.18.0-custom.9 --repo cybito/zed \
+  --pattern 'v1.18.0-custom.9-darwin-*'
+prefix='v1.18.0-custom.9-darwin-'
 for file in "$prefix"*; do mv "$file" "${file#"$prefix"}"; done
 shasum -a 256 -c SHA256SUMS
 mkdir /tmp/zed-mount
-hdiutil attach /tmp/zed-darwin-download/zed-v1.18.0-custom.8-darwin-arm64.dmg \
+hdiutil attach /tmp/zed-darwin-download/zed-v1.18.0-custom.9-darwin-arm64.dmg \
   -readonly -nobrowse -mountpoint /tmp/zed-mount
 /tmp/zed-mount/install.sh --prefix /absolute/install-prefix
 hdiutil detach /tmp/zed-mount
