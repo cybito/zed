@@ -22,20 +22,29 @@ STUB
 cat > "$scratch/gui-bin/identify" <<'STUB'
 #!/bin/sh
 [ "$1" = -format ] && [ "$2" = %k ] || exit 2
-printf '%s\n' "${FAKE_COLORS:?}"
+count=0
+[ ! -f "$FAKE_COLOR_COUNT_FILE" ] || IFS= read -r count < "$FAKE_COLOR_COUNT_FILE"
+count=$((count + 1))
+printf '%s\n' "$count" > "$FAKE_COLOR_COUNT_FILE"
+if [ "$count" -ge "$FAKE_VISIBLE_AFTER" ]; then printf '1010\n'; else printf '1\n'; fi
 STUB
 cat > "$scratch/gui-bin/zed" <<'STUB'
 #!/bin/sh
-exec sleep 60
+exec /bin/sleep 60
+STUB
+cat > "$scratch/gui-bin/sleep" <<'STUB'
+#!/bin/sh
+exit 0
 STUB
 chmod +x "$scratch/gui-bin"/*
-smoke_env=(PATH="$scratch/gui-bin:$PATH" ZED_SMOKE_BINARY="$scratch/gui-bin/zed" ZED_SMOKE_FIXTURE="$scratch/gui-fixture" ZED_SMOKE_DIAGNOSTICS="$scratch/gui-diagnostics")
-if env "${smoke_env[@]}" FAKE_COLORS=1 bash "$smoke" > "$scratch/blank-smoke.log" 2>&1; then
+smoke_env=(PATH="$scratch/gui-bin:$PATH" ZED_SMOKE_BINARY="$scratch/gui-bin/zed" ZED_SMOKE_FIXTURE="$scratch/gui-fixture" ZED_SMOKE_DIAGNOSTICS="$scratch/gui-diagnostics" FAKE_COLOR_COUNT_FILE="$scratch/gui-diagnostics/color-count")
+if env "${smoke_env[@]}" FAKE_VISIBLE_AFTER=999 bash "$smoke" > "$scratch/blank-smoke.log" 2>&1; then
   echo 'blank GUI screenshot passed smoke validation' >&2
   exit 1
 fi
-grep -q 'screenshot is blank (1 unique colors)' "$scratch/blank-smoke.log"
-env "${smoke_env[@]}" FAKE_COLORS=1010 bash "$smoke"
+grep -q 'no visible smoke.txt window after 90 attempts' "$scratch/blank-smoke.log"
+rm -f "$scratch/gui-diagnostics/color-count"
+env "${smoke_env[@]}" FAKE_VISIBLE_AFTER=3 bash "$smoke"
 
 git clone --shared --no-checkout "$root" "$scratch/repo" >/dev/null
 git -C "$scratch/repo" checkout --detach "$sha" >/dev/null
