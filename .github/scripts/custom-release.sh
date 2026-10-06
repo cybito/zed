@@ -67,7 +67,7 @@ else
   fi
   (( $(df -Pk . | awk 'NR==2 {print $4}') >= 26214400 )) || { echo 'Zed requires 25 GiB free' >&2; exit 1; }
   bash script/linux
-  sudo apt-get install -y llvm desktop-file-utils xvfb xauth dbus-x11 mesa-vulkan-drivers libgl1-mesa-dri imagemagick x11-utils
+  sudo apt-get install -y llvm desktop-file-utils xvfb xauth dbus-x11 mesa-vulkan-drivers libgl1-mesa-dri imagemagick x11-utils openbox xdotool
   REMOTE_SERVER_TARGET=aarch64-unknown-linux-gnu bash script/bundle-linux
   cp target/zed-remote-server-linux-aarch64.gz "$out/zed-remote-server-$tag-linux-arm64.gz"
 fi

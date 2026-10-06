@@ -14,6 +14,16 @@ cat > "$scratch/gui-bin/xwininfo" <<'STUB'
 #!/bin/sh
 printf '0x123 "smoke.txt": ("dev.zed.Zed-Dev" "dev.zed.Zed-Dev") 1280x800+0+0\n'
 STUB
+cat > "$scratch/gui-bin/openbox" <<'STUB'
+#!/bin/sh
+: > "$FAKE_WM_MARKER"
+exec /bin/sleep 60
+STUB
+cat > "$scratch/gui-bin/xdotool" <<'STUB'
+#!/bin/sh
+[ "$1" = windowactivate ] && [ "$2" = --sync ] && [ "$3" = 0x123 ] || exit 2
+: > "$FAKE_FOCUS_MARKER"
+STUB
 cat > "$scratch/gui-bin/import" <<'STUB'
 #!/bin/sh
 [ "$1" = -window ] && [ "$2" = 0x123 ] || exit 2
@@ -37,14 +47,15 @@ cat > "$scratch/gui-bin/sleep" <<'STUB'
 exit 0
 STUB
 chmod +x "$scratch/gui-bin"/*
-smoke_env=(PATH="$scratch/gui-bin:$PATH" ZED_SMOKE_BINARY="$scratch/gui-bin/zed" ZED_SMOKE_FIXTURE="$scratch/gui-fixture" ZED_SMOKE_DIAGNOSTICS="$scratch/gui-diagnostics" FAKE_COLOR_COUNT_FILE="$scratch/gui-diagnostics/color-count")
+smoke_env=(PATH="$scratch/gui-bin:$PATH" ZED_SMOKE_BINARY="$scratch/gui-bin/zed" ZED_SMOKE_FIXTURE="$scratch/gui-fixture" ZED_SMOKE_DIAGNOSTICS="$scratch/gui-diagnostics" FAKE_COLOR_COUNT_FILE="$scratch/gui-diagnostics/color-count" FAKE_WM_MARKER="$scratch/gui-diagnostics/wm-started" FAKE_FOCUS_MARKER="$scratch/gui-diagnostics/window-focused")
 if env "${smoke_env[@]}" FAKE_VISIBLE_AFTER=999 bash "$smoke" > "$scratch/blank-smoke.log" 2>&1; then
   echo 'blank GUI screenshot passed smoke validation' >&2
   exit 1
 fi
 grep -q 'no visible smoke.txt window after 90 attempts' "$scratch/blank-smoke.log"
-rm -f "$scratch/gui-diagnostics/color-count"
+rm -f "$scratch/gui-diagnostics/color-count" "$scratch/gui-diagnostics/wm-started" "$scratch/gui-diagnostics/window-focused"
 env "${smoke_env[@]}" FAKE_VISIBLE_AFTER=3 bash "$smoke"
+[[ -f "$scratch/gui-diagnostics/wm-started" && -f "$scratch/gui-diagnostics/window-focused" ]] || { echo 'GUI smoke did not activate the desktop window' >&2; exit 1; }
 
 git clone --shared --no-checkout "$root" "$scratch/repo" >/dev/null
 git -C "$scratch/repo" checkout --detach "$sha" >/dev/null

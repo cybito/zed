@@ -12,7 +12,7 @@ Only a **published GitHub Release** triggers `.github/workflows/custom-release.y
 Pushes, tag pushes and pull requests do not publish. The tag must be
 `v<crates/zed/Cargo.toml version>-custom.<positive integer>`; the current base is
 `1.18.0`; this migration's first fully validated asset release uses
-`v1.18.0-custom.7`. Existing release tags are never moved. The tag commit must be
+`v1.18.0-custom.8`. Existing release tags are never moved. The tag commit must be
 an ancestor of `origin/custom` and contain the workflow and scripts. Both platforms
 check out exactly that commit; later pushes cannot change the build.
 
@@ -25,8 +25,8 @@ setup is needed. The summary job also has `contents: write` to update notes.
 Publish the release targeting the pushed custom SHA:
 
 ```sh
-gh release create v1.18.0-custom.7 --repo cybito/zed \
-  --target <custom-commit-sha> --title v1.18.0-custom.7 \
+gh release create v1.18.0-custom.8 --repo cybito/zed \
+  --target <custom-commit-sha> --title v1.18.0-custom.8 \
   --notes 'Custom Zed Dev; installation packages are attached to this GitHub Release.'
 ```
 
@@ -71,15 +71,15 @@ platform's assets with a matching pattern:
 ```sh
 mkdir -p /tmp/zed-download
 cd /tmp/zed-download
-gh release download v1.18.0-custom.7 --repo cybito/zed \
-  --pattern 'v1.18.0-custom.7-linux-*'
-prefix='v1.18.0-custom.7-linux-'
+gh release download v1.18.0-custom.8 --repo cybito/zed \
+  --pattern 'v1.18.0-custom.8-linux-*'
+prefix='v1.18.0-custom.8-linux-'
 for file in "$prefix"*; do mv "$file" "${file#"$prefix"}"; done
 sha256sum -c SHA256SUMS
 ```
 
 Asset names include release tag and platform; for example:
-`v1.18.0-custom.7-linux-zed-v1.18.0-custom.7-linux-arm64.tar.gz`.
+`v1.18.0-custom.8-linux-zed-v1.18.0-custom.8-linux-arm64.tar.gz`.
 The loop restores the package's original filenames for checksum and install
 commands below.
 
@@ -87,7 +87,7 @@ Linux:
 
 ```sh
 mkdir /tmp/zed-unpacked
-tar -xzf /tmp/zed-download/zed-v1.18.0-custom.7-linux-arm64.tar.gz -C /tmp/zed-unpacked
+tar -xzf /tmp/zed-download/zed-v1.18.0-custom.8-linux-arm64.tar.gz -C /tmp/zed-unpacked
 /tmp/zed-unpacked/install.sh --prefix /absolute/install-prefix
 ```
 
@@ -101,13 +101,13 @@ macOS:
 ```sh
 mkdir -p /tmp/zed-darwin-download
 cd /tmp/zed-darwin-download
-gh release download v1.18.0-custom.7 --repo cybito/zed \
-  --pattern 'v1.18.0-custom.7-darwin-*'
-prefix='v1.18.0-custom.7-darwin-'
+gh release download v1.18.0-custom.8 --repo cybito/zed \
+  --pattern 'v1.18.0-custom.8-darwin-*'
+prefix='v1.18.0-custom.8-darwin-'
 for file in "$prefix"*; do mv "$file" "${file#"$prefix"}"; done
 shasum -a 256 -c SHA256SUMS
 mkdir /tmp/zed-mount
-hdiutil attach /tmp/zed-darwin-download/zed-v1.18.0-custom.7-darwin-arm64.dmg \
+hdiutil attach /tmp/zed-darwin-download/zed-v1.18.0-custom.8-darwin-arm64.dmg \
   -readonly -nobrowse -mountpoint /tmp/zed-mount
 /tmp/zed-mount/install.sh --prefix /absolute/install-prefix
 hdiutil detach /tmp/zed-mount
@@ -130,9 +130,9 @@ headers, verifies macOS deep/strict signatures and Linux dependencies/desktop
 entries, and opens `smoke.txt` containing `custom-ci-ok`. Native `--help` confirms
 `--user-data-dir` before it is used. macOS CoreGraphics enumerates a visible
 `smoke.txt` window and captures it; Linux uses a fixed X11 session under
-`dbus-run-session`/Xvfb with Mesa software rendering, inspecting window titles
-and capturing a screenshot. Missing window/screenshot evidence fails the job,
-not a false GUI success.
+`dbus-run-session`/Xvfb, Openbox and Mesa software rendering. It focuses the app and
+retries screenshots for up to 90 seconds until the window contains rendered pixels;
+blank captures fail and the Zed startup log is preserved for diagnostics.
 
 GUI diagnostic files are uploaded with the repository's pinned
 `actions/upload-artifact` action for seven days, separate from product assets.
