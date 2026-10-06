@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe XDG_SESSION_TYPE=x11
+export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe XDG_SESSION_TYPE=x11 ZED_ALLOW_EMULATED_GPU=1
 unset WAYLAND_DISPLAY
 
 openbox --sm-disable > "$ZED_SMOKE_DIAGNOSTICS/window-manager.log" 2>&1 &

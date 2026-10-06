@@ -130,7 +130,8 @@ headers, verifies macOS deep/strict signatures and Linux dependencies/desktop
 entries, and opens `smoke.txt` containing `custom-ci-ok`. Native `--help` confirms
 `--user-data-dir` before it is used. macOS CoreGraphics enumerates a visible
 `smoke.txt` window and captures it; Linux uses a fixed X11 session under
-`dbus-run-session`/Xvfb, Openbox and Mesa software rendering. It focuses the app and
+`dbus-run-session`/Xvfb, Openbox and Mesa software rendering. It sets
+`ZED_ALLOW_EMULATED_GPU=1` for this software-rendered CI session, focuses the app and
 retries screenshots for up to 90 seconds until the window contains rendered pixels;
 blank captures fail and the Zed startup log is preserved for diagnostics.
 

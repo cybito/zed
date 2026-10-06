@@ -40,6 +40,7 @@ if [ "$count" -ge "$FAKE_VISIBLE_AFTER" ]; then printf '1010\n'; else printf '1\
 STUB
 cat > "$scratch/gui-bin/zed" <<'STUB'
 #!/bin/sh
+printf '%s\n' "${ZED_ALLOW_EMULATED_GPU:-missing}" > "$FAKE_GPU_OVERRIDE_MARKER"
 exec /bin/sleep 60
 STUB
 cat > "$scratch/gui-bin/sleep" <<'STUB'
@@ -47,7 +48,7 @@ cat > "$scratch/gui-bin/sleep" <<'STUB'
 exit 0
 STUB
 chmod +x "$scratch/gui-bin"/*
-smoke_env=(PATH="$scratch/gui-bin:$PATH" ZED_SMOKE_BINARY="$scratch/gui-bin/zed" ZED_SMOKE_FIXTURE="$scratch/gui-fixture" ZED_SMOKE_DIAGNOSTICS="$scratch/gui-diagnostics" FAKE_COLOR_COUNT_FILE="$scratch/gui-diagnostics/color-count" FAKE_WM_MARKER="$scratch/gui-diagnostics/wm-started" FAKE_FOCUS_MARKER="$scratch/gui-diagnostics/window-focused")
+smoke_env=(PATH="$scratch/gui-bin:$PATH" ZED_SMOKE_BINARY="$scratch/gui-bin/zed" ZED_SMOKE_FIXTURE="$scratch/gui-fixture" ZED_SMOKE_DIAGNOSTICS="$scratch/gui-diagnostics" FAKE_COLOR_COUNT_FILE="$scratch/gui-diagnostics/color-count" FAKE_WM_MARKER="$scratch/gui-diagnostics/wm-started" FAKE_FOCUS_MARKER="$scratch/gui-diagnostics/window-focused" FAKE_GPU_OVERRIDE_MARKER="$scratch/gui-diagnostics/gpu-override")
 if env "${smoke_env[@]}" FAKE_VISIBLE_AFTER=999 bash "$smoke" > "$scratch/blank-smoke.log" 2>&1; then
   echo 'blank GUI screenshot passed smoke validation' >&2
   exit 1
@@ -56,6 +57,7 @@ grep -q 'no visible smoke.txt window after 90 attempts' "$scratch/blank-smoke.lo
 rm -f "$scratch/gui-diagnostics/color-count" "$scratch/gui-diagnostics/wm-started" "$scratch/gui-diagnostics/window-focused"
 env "${smoke_env[@]}" FAKE_VISIBLE_AFTER=3 bash "$smoke"
 [[ -f "$scratch/gui-diagnostics/wm-started" && -f "$scratch/gui-diagnostics/window-focused" ]] || { echo 'GUI smoke did not activate the desktop window' >&2; exit 1; }
+[[ $(<"$scratch/gui-diagnostics/gpu-override") == 1 ]] || { echo 'GUI smoke did not allow the software-rendered GPU' >&2; exit 1; }
 
 git clone --shared --no-checkout "$root" "$scratch/repo" >/dev/null
 git -C "$scratch/repo" checkout --detach "$sha" >/dev/null
