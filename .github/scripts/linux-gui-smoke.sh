@@ -16,7 +16,7 @@ colors=0
 for attempt in {1..90}; do
   xwininfo -root -tree > "$ZED_SMOKE_DIAGNOSTICS/window.txt"
   if grep -q smoke.txt "$ZED_SMOKE_DIAGNOSTICS/window.txt"; then
-    window_id=$(awk '/"smoke.txt"/ { print $1; exit }' "$ZED_SMOKE_DIAGNOSTICS/window.txt")
+    window_id=$(awk '/smoke\.txt/ { print $1; exit }' "$ZED_SMOKE_DIAGNOSTICS/window.txt")
     [[ -n $window_id ]] || { echo 'smoke window has no X11 ID' >&2; exit 1; }
     xdotool windowactivate --sync "$window_id"
     import -window "$window_id" "$ZED_SMOKE_DIAGNOSTICS/window.png"

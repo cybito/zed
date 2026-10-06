@@ -12,7 +12,7 @@ bash -n "$smoke"
 mkdir -p "$scratch/gui-bin" "$scratch/gui-fixture/data" "$scratch/gui-diagnostics"
 cat > "$scratch/gui-bin/xwininfo" <<'STUB'
 #!/bin/sh
-printf '0x123 "smoke.txt": ("dev.zed.Zed-Dev" "dev.zed.Zed-Dev") 1280x800+0+0\n'
+printf '0x123 "smoke.txt — smoke.txt": ("dev.zed.Zed-Dev" "dev.zed.Zed-Dev") 1280x800+0+0\n'
 STUB
 cat > "$scratch/gui-bin/openbox" <<'STUB'
 #!/bin/sh
