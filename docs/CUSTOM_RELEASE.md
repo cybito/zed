@@ -11,7 +11,7 @@
 Only a **published GitHub Release** triggers `.github/workflows/custom-release.yml`.
 Pushes, tag pushes and pull requests do not publish. The tag must be
 `v<crates/zed/Cargo.toml version>-custom.<positive integer>`; the current base is
-`1.18.0`; the editor-surface smoke release candidate uses
+`1.18.0`; the successful editor-surface smoke release uses
 `v1.18.0-custom.10`. Existing release tags are never moved. The tag commit must be
 an ancestor of `origin/custom` and contain the workflow and scripts. Both platforms
 check out exactly that commit; later pushes cannot change the build.
@@ -31,7 +31,7 @@ gh release create v1.18.0-custom.10 --repo cybito/zed \
 ```
 
 Release `.8` completed both builds. `.9` completed macOS but Linux could not extract
-the compound X11 window title; `.10` fixes that parser for the editor-surface smoke.
+the compound X11 title. `.10` fixes that parser; both GUI smokes and asset readback passed.
 
 ## Build and storage contract
 
